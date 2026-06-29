@@ -701,7 +701,7 @@ async def cb_coach_preset(callback: CallbackQuery):
     if VPS_HOST and VPS_PASSWORD:
         result = await _run_claude_vps(callback.message.chat.id, COACH_SYSTEM + preset_prompt)
     else:
-        result = await _run_claude_local(COACH_SYSTEM + preset_prompt)
+        result = await _run_claude_local(_build_local_coach_prompt(callback.message.chat.id, preset_prompt))
     await wait.delete()
     for i in range(0, len(result), 4000):
         await callback.message.answer(result[i:i+4000], reply_markup=_coach_kb() if i + 4000 >= len(result) else None)
@@ -711,7 +711,7 @@ async def cb_coach_preset(callback: CallbackQuery):
 async def _dispatch_coach(message: Message):
     """Обрабатывает свободный текст в режиме коуча."""
     wait = await message.answer("💭 Коуч думает... (0с)")
-    prompt = COACH_SYSTEM + message.text.strip()
+    user_text = message.text.strip()
 
     done_event = asyncio.Event()
     async def _ticker():
@@ -729,17 +729,17 @@ async def _dispatch_coach(message: Message):
 
     try:
         if VPS_HOST and VPS_PASSWORD:
-            result = await _run_claude_vps(message.chat.id, prompt)
+            result = await _run_claude_vps(message.chat.id, COACH_SYSTEM + user_text)
         else:
-            result = await _run_claude_local(prompt)
+            result = await _run_claude_local(_build_local_coach_prompt(message.chat.id, user_text))
     finally:
         done_event.set()
         ticker_task.cancel()
 
     # Сохраняем факты и историю коуч-сессии
-    _memory.save_from_session(message.chat.id, message.text.strip(), result)
+    _memory.save_from_session(message.chat.id, user_text, result)
     hist = _history.setdefault(message.chat.id, [])
-    hist.append(("user", message.text.strip()))
+    hist.append(("user", user_text))
     hist.append(("assistant", result[:500]))
     if len(hist) > 24:
         _history[message.chat.id] = hist[-24:]
@@ -855,6 +855,27 @@ def _build_prompt(chat_id: int, user_message: str) -> str:
 
     parts.append(f"=== НОВОЕ СООБЩЕНИЕ ===\n{user_message}")
     return "\n\n".join(parts)
+
+
+def _build_local_coach_prompt(chat_id: int, user_message: str) -> str:
+    """Собирает промпт коуча с графом знаний и историей сессии (для локального режима)."""
+    parts = [COACH_SYSTEM.strip()]
+
+    graph_ctx = _memory.get_user_context(chat_id)
+    if graph_ctx:
+        parts.append(f"=== ЧТО Я ЗНАЮ О ТЕБЕ ===\n{graph_ctx}")
+
+    session = _history.get(chat_id, [])
+    if session:
+        hist_lines = "\n".join(
+            f"{'Клиент' if r == 'user' else 'Коуч'}: {t}"
+            for r, t in session[-12:]
+        )
+        parts.append(f"=== ИСТОРИЯ НАШЕЙ СЕССИИ ===\n{hist_lines}")
+
+    parts.append(f"=== НОВОЕ СООБЩЕНИЕ КЛИЕНТА ===\n{user_message}")
+    return "\n\n".join(parts)
+
 
 def _save_to_vps_memory(chat_id: int, user_msg: str, assistant_msg: str):
     """Дописывает обмен в memory.json на VPS."""
