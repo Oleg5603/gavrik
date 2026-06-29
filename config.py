@@ -3,6 +3,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).parent
+
 load_dotenv(BASE_DIR / ".env")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -15,6 +16,8 @@ VPS_HOST = os.getenv("VPS_HOST", "")
 VPS_USER = os.getenv("VPS_USER", "agent")
 VPS_PASSWORD = os.getenv("VPS_PASSWORD", "")
 CLAUDE_BIN = os.getenv("CLAUDE_BIN", "claude")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 _raw_ids = os.getenv("ALLOWED_USER_IDS", "")
 ALLOWED_USER_IDS: list[int] = [

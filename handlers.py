@@ -11,7 +11,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import (
     VK_TOKEN, VK_GROUP_ID, SITE_URL,
     CONTENT_PLAN_PATH, DIRECT_CSV_PATH, LANDING_DIR, ALLOWED_USER_IDS,
-    VPS_HOST, VPS_USER, VPS_PASSWORD, CLAUDE_BIN, BASE_DIR
+    VPS_HOST, VPS_USER, VPS_PASSWORD, CLAUDE_BIN, BASE_DIR,
+    ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
 )
 import json as _json_mod
 from memory_graph import MemoryGraph
@@ -50,6 +51,12 @@ def _save_history():
 
 # История разговора: chat_id -> [(role, text), ...] — персистентная
 _history: dict[int, list] = _load_history()
+
+AGENT_SYSTEM = (
+    "Ты — Гаврик, умный персональный ИИ-ассистент. "
+    "Отвечаешь чётко, по делу, на русском языке. "
+    "Помнишь контекст разговора и используешь его в ответах."
+)
 
 COACH_SYSTEM = (
     "Ты — коуч по финансовой эффективности и личному росту.\n\n"
@@ -698,10 +705,7 @@ async def cb_coach_preset(callback: CallbackQuery):
         await callback.answer("Неизвестная тема")
         return
     wait = await callback.message.answer("💭 Коуч думает...")
-    if VPS_HOST and VPS_PASSWORD:
-        result = await _run_claude_vps(callback.message.chat.id, COACH_SYSTEM + preset_prompt)
-    else:
-        result = await _run_claude_local(_build_local_coach_prompt(callback.message.chat.id, preset_prompt))
+    result = await _ask_ai(COACH_SYSTEM, preset_prompt, callback.message.chat.id)
     await wait.delete()
     for i in range(0, len(result), 4000):
         await callback.message.answer(result[i:i+4000], reply_markup=_coach_kb() if i + 4000 >= len(result) else None)
@@ -728,10 +732,7 @@ async def _dispatch_coach(message: Message):
     ticker_task = asyncio.create_task(_ticker())
 
     try:
-        if VPS_HOST and VPS_PASSWORD:
-            result = await _run_claude_vps(message.chat.id, COACH_SYSTEM + user_text)
-        else:
-            result = await _run_claude_local(_build_local_coach_prompt(message.chat.id, user_text))
+        result = await _ask_ai(COACH_SYSTEM, user_text, message.chat.id)
     finally:
         done_event.set()
         ticker_task.cancel()
@@ -750,22 +751,81 @@ async def _dispatch_coach(message: Message):
         await message.answer(result[i:i+4000], reply_markup=_coach_kb() if i + 4000 >= len(result) else None)
 
 
-async def _run_claude_local(prompt: str) -> str:
-    """Запуск claude локально через subprocess."""
-    proc = await asyncio.create_subprocess_exec(
-        CLAUDE_BIN, "--print", prompt,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = None) -> str:
+    """
+    Единая точка вызова AI.
+    1. Если ANTHROPIC_API_KEY — прямой SDK (быстро, надёжно).
+    2. Иначе — subprocess claude через cmd /c + stdin (работает на Windows).
+    """
+    if ANTHROPIC_API_KEY:
+        return await _run_anthropic_sdk(system_prompt, user_message, chat_id)
+    return await _run_claude_subprocess(system_prompt + "\n\n" + user_message)
+
+
+async def _run_anthropic_sdk(system_prompt: str, user_message: str, chat_id: int | None) -> str:
+    """Прямой вызов Anthropic API через SDK."""
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        import anthropic
+        client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+        messages: list = []
+        if chat_id is not None:
+            for role, text in _history.get(chat_id, [])[-12:]:
+                messages.append({"role": role if role in ("user", "assistant") else "user", "content": text})
+        messages.append({"role": "user", "content": user_message})
+
+        response = await asyncio.wait_for(
+            client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=2048,
+                system=system_prompt,
+                messages=messages,
+            ),
+            timeout=30,
+        )
+        return response.content[0].text.strip()
+    except asyncio.TimeoutError:
+        return "⏱ Таймаут 30с — попробуй ещё раз."
+    except Exception as e:
+        return f"❌ Ошибка API: {e}"
+
+
+async def _run_claude_subprocess(full_prompt: str) -> str:
+    """Запуск claude через cmd /c с передачей промпта через stdin (Windows-совместимо)."""
+    import os
+    env = {**os.environ}
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        env.pop(k, None)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "cmd", "/c", "claude", "--print",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=full_prompt.encode("utf-8", errors="replace")),
+            timeout=60,
+        )
         result = stdout.decode("utf-8", errors="replace").strip()
-        if not result and stderr:
+        if not result:
             result = stderr.decode("utf-8", errors="replace").strip()
         return result or "Агент не вернул ответ."
     except asyncio.TimeoutError:
-        proc.kill()
-        return "⏱ Таймаут — агент думал дольше 2 минут."
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return "⏱ Таймаут 60с."
+    except Exception as e:
+        return f"❌ Ошибка subprocess: {e}"
+
+
+async def _run_claude_local(prompt: str) -> str:
+    """Обратная совместимость — делегирует в _run_claude_subprocess."""
+    return await _run_claude_subprocess(prompt)
 
 
 def _read_vps_file(client, path: str) -> str:
@@ -943,10 +1003,7 @@ async def handle_agent_message(message: Message):
     ticker_task = asyncio.create_task(_ticker())
 
     try:
-        if VPS_HOST and VPS_PASSWORD:
-            result = await _run_claude_vps(message.chat.id, prompt)
-        else:
-            result = await _run_claude_local(prompt)
+        result = await _ask_ai(AGENT_SYSTEM, prompt, message.chat.id)
     finally:
         done_event.set()
         ticker_task.cancel()
@@ -959,12 +1016,8 @@ async def handle_agent_message(message: Message):
         _history[message.chat.id] = hist[-24:]
     _save_history()
 
-    # Сохраняем в граф знаний (локально) и в memory.json на VPS
+    # Сохраняем факты в граф знаний
     _memory.save_from_session(message.chat.id, prompt, result)
-    if VPS_HOST and VPS_PASSWORD:
-        asyncio.get_event_loop().run_in_executor(
-            None, _save_to_vps_memory, message.chat.id, prompt, result
-        )
 
     await wait.delete()
 
