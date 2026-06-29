@@ -23,34 +23,42 @@ _SESSIONS_FILE = BASE_DIR / "sessions.json"
 log = logging.getLogger(__name__)
 router = Router()
 
-# Пользователи в режиме агента
-_agent_mode: set[int] = set()
-# Пользователи в режиме финансового коуча
-_coach_mode: set[int] = set()
+# Режимы и история — загружаются из файла, переживают перезапуск
+_history: dict[int, list]
+_agent_mode: set[int]
+_coach_mode: set[int]
 
 
-def _load_history() -> dict[int, list]:
+def _load_state() -> tuple[dict[int, list], set[int], set[int]]:
+    """Загружает историю и активные режимы из файла."""
     try:
         if _SESSIONS_FILE.exists():
-            raw = _json_mod.loads(_SESSIONS_FILE.read_text(encoding="utf-8"))
-            return {int(k): v for k, v in raw.items()}
+            data = _json_mod.loads(_SESSIONS_FILE.read_text(encoding="utf-8"))
+            history = {int(k): v for k, v in data.get("history", {}).items()}
+            agent = set(int(x) for x in data.get("agent_mode", []))
+            coach = set(int(x) for x in data.get("coach_mode", []))
+            return history, agent, coach
     except Exception as e:
         log.warning("Не удалось загрузить sessions.json: %s", e)
-    return {}
+    return {}, set(), set()
 
 
 def _save_history():
     try:
         _SESSIONS_FILE.write_text(
-            _json_mod.dumps({str(k): v for k, v in _history.items()}, ensure_ascii=False, indent=2),
+            _json_mod.dumps({
+                "history": {str(k): v for k, v in _history.items()},
+                "agent_mode": list(_agent_mode),
+                "coach_mode": list(_coach_mode),
+            }, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
     except Exception as e:
         log.warning("Не удалось сохранить sessions.json: %s", e)
 
 
-# История разговора: chat_id -> [(role, text), ...] — персистентная
-_history: dict[int, list] = _load_history()
+# История и режимы — персистентные, переживают перезапуск бота
+_history, _agent_mode, _coach_mode = _load_state()
 
 AGENT_SYSTEM = (
     "Ты — Гаврик, умный персональный ИИ-ассистент. "
@@ -515,6 +523,7 @@ async def cmd_help(message: Message):
 @router.callback_query(F.data == "agent_mode")
 async def cb_agent_mode(callback: CallbackQuery):
     _agent_mode.add(callback.message.chat.id)
+    _save_history()
     kb = InlineKeyboardBuilder()
     kb.button(text="❌ Выйти из режима агента", callback_data="agent_exit")
     kb.button(text="🗑 Очистить историю", callback_data="agent_clear")
@@ -533,6 +542,7 @@ async def cb_agent_mode(callback: CallbackQuery):
 @router.callback_query(F.data == "agent_exit")
 async def cb_agent_exit(callback: CallbackQuery):
     _agent_mode.discard(callback.message.chat.id)
+    _save_history()
     await callback.message.answer("Вышел из режима агента.", reply_markup=_main_kb())
     await callback.answer()
 
@@ -549,6 +559,7 @@ async def cmd_agent(message: Message):
     if not _auth(message):
         return
     _agent_mode.add(message.chat.id)
+    _save_history()
     vps_info = f"VPS: {VPS_HOST}" if VPS_HOST else "Локально"
     await message.answer(
         f"🤖 Режим агента включён ({vps_info})\n"
@@ -564,6 +575,7 @@ async def cmd_coach(message: Message):
         return
     _coach_mode.add(message.chat.id)
     _agent_mode.discard(message.chat.id)
+    _save_history()
     await message.answer(
         "💼 *Финансовый коуч активирован*\n\n"
         "Я помогу разобраться с финансовой эффективностью и ростом.\n"
@@ -576,6 +588,7 @@ async def cmd_coach(message: Message):
 async def cb_coach_mode_btn(callback: CallbackQuery):
     _coach_mode.add(callback.message.chat.id)
     _agent_mode.discard(callback.message.chat.id)
+    _save_history()
     await callback.message.answer(
         "💼 *Финансовый коуч активирован*\n\n"
         "Выбери тему или напиши свой вопрос:",
@@ -587,6 +600,7 @@ async def cb_coach_mode_btn(callback: CallbackQuery):
 @router.callback_query(F.data == "coach_exit")
 async def cb_coach_exit(callback: CallbackQuery):
     _coach_mode.discard(callback.message.chat.id)
+    _save_history()
     await callback.message.answer("Вышел из режима коуча.", reply_markup=_main_kb())
     await callback.answer()
 
