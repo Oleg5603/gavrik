@@ -3,6 +3,7 @@
 и базовые команды управления (статус, git pull) по каждому.
 """
 import asyncio
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,34 +12,39 @@ from pathlib import Path
 class Project:
     key: str
     name: str
-    path: Path
+    win_path: str
     description: str
-    is_git: bool = True
+    linux_path: str | None = None  # None = ещё не синхронизирован на VPS
+
+    @property
+    def path(self) -> Path | None:
+        raw = self.linux_path if os.name != "nt" else self.win_path
+        return Path(raw) if raw else None
 
 
 PROJECTS: list[Project] = [
-    Project("jarvis-gold", "Jarvis Gold (монорепо)", Path(r"C:\Users\HP\Documents\Project"),
+    Project("jarvis-gold", "Jarvis Gold (монорепо)", r"C:\Users\HP\Documents\Project",
             "Основной рабочий репозиторий: подпроекты, боты, торговые советники"),
-    Project("keen-lead-scoop", "Keen Lead Scoop", Path(r"C:\Users\HP\Documents\Project\keen-lead-scoop"),
+    Project("keen-lead-scoop", "Keen Lead Scoop", r"C:\Users\HP\Documents\Project\keen-lead-scoop",
             "Дашборд лидов, TanStack Start/React, Lovable.dev"),
-    Project("jarvis-architect", "Jarvis Architect", Path(r"C:\Users\HP\jarvis-architect"),
+    Project("jarvis-architect", "Jarvis Architect", r"C:\Users\HP\jarvis-architect",
             "Шаблон персонального AI-агента на Claude Code + Telegram-бот"),
-    Project("graphify", "Graphify", Path(r"C:\Users\HP\graphify"),
+    Project("graphify", "Graphify", r"C:\Users\HP\graphify",
             "Codebase → knowledge graph, PyPI-пакет, YC S26"),
-    Project("sleep-cube", "Sleep Cube", Path(r"C:\Users\HP\sleep-cube"),
+    Project("sleep-cube", "Sleep Cube", r"C:\Users\HP\sleep-cube",
             "Android-приложение для сна, Kotlin/Compose"),
-    Project("tkm", "ТКМ", Path(r"C:\Users\HP\tkm"),
+    Project("tkm", "ТКМ", r"C:\Users\HP\tkm",
             "Подбор точек ТКМ, Python десктоп + Flask веб"),
-    Project("galactic-academy", "Galactic Academy", Path(r"C:\Users\HP\Проекты\galactic_academy"),
+    Project("galactic-academy", "Galactic Academy", r"C:\Users\HP\Проекты\galactic_academy",
             "PDF-ридер с озвучкой голосами Star Wars"),
-    Project("periph-eyes", "PeriphEyes", Path(r"C:\Users\HP\Проекты\oftalm\periph_eyes"),
+    Project("periph-eyes", "PeriphEyes", r"C:\Users\HP\Проекты\oftalm\periph_eyes",
             "Windows-оверлей для тренировки периферийного зрения"),
-    Project("sibvaleo", "Sibvaleo", Path(r"C:\Users\HP\Проекты\sibvaleo"),
+    Project("sibvaleo", "Sibvaleo", r"C:\Users\HP\Проекты\sibvaleo",
             "Flutter-приложение для консультантов Siberian Wellness"),
-    Project("sniper-ea", "Sniper EA", Path(r"C:\Users\HP\Форекс\sniper_ea"),
+    Project("sniper-ea", "Sniper EA", r"C:\Users\HP\Форекс\sniper_ea",
             "Торговый советник MT4 по золоту (XAUUSD)"),
-    Project("gavrik", "Гаврик (этот бот)", Path(r"C:\Users\HP\gavrik"),
-            "Telegram-бот управления проектом Светланы Палкиной"),
+    Project("gavrik", "Гаврик (этот бот)", r"C:\Users\HP\gavrik",
+            "Telegram-бот управления проектом Светланы Палкиной", linux_path="/root/gavrik"),
 ]
 
 
@@ -63,7 +69,10 @@ async def _run_git(path: Path, *args: str) -> str:
 
 async def get_status(project: Project) -> dict:
     """Короткий статус проекта: существует ли путь, ветка, последний коммит, есть ли незакоммиченное."""
-    result = {"exists": project.path.exists(), "branch": "", "last_commit": "", "dirty": False, "has_git": False}
+    result = {"exists": False, "branch": "", "last_commit": "", "dirty": False, "has_git": False, "synced": bool(project.path)}
+    if project.path is None:
+        return result
+    result["exists"] = project.path.exists()
     if not result["exists"]:
         return result
 
@@ -83,6 +92,8 @@ async def get_status(project: Project) -> dict:
 
 
 async def pull(project: Project) -> str:
+    if project.path is None:
+        return "Проект ещё не синхронизирован на этой машине."
     if not (project.path / ".git").exists():
         return "Не git-репозиторий."
     return await _run_git(project.path, "pull") or "Нет изменений или ошибка pull."
@@ -92,5 +103,6 @@ def context_summary() -> str:
     """Компактное текстовое описание всех проектов — для системного промпта агента."""
     lines = ["Известные проекты пользователя (Олег, соло-разработчик 15+ side-проектов):"]
     for p in PROJECTS:
-        lines.append(f"- {p.name} ({p.key}): {p.description} — путь: {p.path}")
+        where = str(p.path) if p.path else f"{p.win_path} (на этой машине не синхронизирован)"
+        lines.append(f"- {p.name} ({p.key}): {p.description} — путь: {where}")
     return "\n".join(lines)

@@ -506,7 +506,12 @@ async def cb_project_detail(callback: CallbackQuery):
     status = await _projects.get_status(project)
     await wait.delete()
 
-    if not status["exists"]:
+    if not status["synced"]:
+        text = (
+            f"*{project.name}*\n{project.description}\n\n"
+            f"🚫 Не синхронизирован на этой машине (путь на ПК: `{project.win_path}`)"
+        )
+    elif not status["exists"]:
         text = f"*{project.name}*\n\n❌ Путь не найден: `{project.path}`"
     elif not status["has_git"]:
         text = (
