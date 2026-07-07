@@ -16,6 +16,7 @@ from config import (
 )
 import json as _json_mod
 from memory_graph import MemoryGraph
+import projects_registry as _projects
 
 _memory = MemoryGraph(BASE_DIR / "knowledge_graph.jsonl")
 _SESSIONS_FILE = BASE_DIR / "sessions.json"
@@ -63,7 +64,10 @@ _history, _agent_mode, _coach_mode = _load_state()
 AGENT_SYSTEM = (
     "Ты — Гаврик, умный персональный ИИ-ассистент. "
     "Отвечаешь чётко, по делу, на русском языке. "
-    "Помнишь контекст разговора и используешь его в ответах."
+    "Помнишь контекст разговора и используешь его в ответах.\n\n"
+    + _projects.context_summary() + "\n\n"
+    "Если пользователь спрашивает про статус/прогресс любого из этих проектов "
+    "или просит что-то по ним сделать — используй эти сведения и команду /projects."
 )
 
 COACH_SYSTEM = (
@@ -183,6 +187,7 @@ def _main_kb():
     kb.button(text="🚀 Управление", callback_data="manage")
     kb.button(text="🤖 Агент", callback_data="agent_mode")
     kb.button(text="💼 Коуч", callback_data="coach_mode")
+    kb.button(text="🗂 Все проекты", callback_data="projects")
     kb.adjust(2)
     return kb.as_markup()
 
@@ -375,7 +380,8 @@ async def _send_manage(message: Message):
         "/stages — статус всех этапов\n"
         "/tasks — список задач\n"
         "/notify on|off — вкл/выкл уведомления\n"
-        "/status — краткий статус всех проектов"
+        "/status — краткий статус всех проектов\n"
+        "/projects — все проекты Олега (статус, git pull)"
     )
     await message.answer(text, reply_markup=kb.as_markup())
 
@@ -463,6 +469,82 @@ async def cmd_status(message: Message):
     await message.answer("\n".join(lines))
 
 
+# ───── ВСЕ ПРОЕКТЫ ─────
+
+@router.message(Command("projects"))
+async def cmd_projects(message: Message):
+    if not _auth(message):
+        return
+    await _send_projects(message)
+
+
+@router.callback_query(F.data == "projects")
+async def cb_projects(callback: CallbackQuery):
+    await _send_projects(callback.message)
+    await callback.answer()
+
+
+async def _send_projects(message: Message):
+    kb = InlineKeyboardBuilder()
+    for p in _projects.PROJECTS:
+        kb.button(text=p.name, callback_data=f"proj_{p.key}")
+    kb.adjust(2)
+    await message.answer(
+        f"*Все проекты ({len(_projects.PROJECTS)})*\n\nВыбери проект для статуса и управления:",
+        reply_markup=kb.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("proj_"))
+async def cb_project_detail(callback: CallbackQuery):
+    key = callback.data.split("_", 1)[1]
+    project = _projects.get_project(key)
+    if not project:
+        await callback.answer("Проект не найден")
+        return
+    wait = await callback.message.answer("Проверяю...")
+    status = await _projects.get_status(project)
+    await wait.delete()
+
+    if not status["exists"]:
+        text = f"*{project.name}*\n\n❌ Путь не найден: `{project.path}`"
+    elif not status["has_git"]:
+        text = (
+            f"*{project.name}*\n{project.description}\n\n"
+            f"📁 `{project.path}`\n⚠️ Не git-репозиторий"
+        )
+    else:
+        text = (
+            f"*{project.name}*\n{project.description}\n\n"
+            f"📁 `{project.path}`\n"
+            f"🌿 Ветка: {status['branch'] or '?'}\n"
+            f"📝 Последний коммит: {status['last_commit'] or '?'}\n"
+            f"{'🔶 Есть незакоммиченные изменения' if status['dirty'] else '✅ Всё закоммичено'}"
+        )
+
+    kb = InlineKeyboardBuilder()
+    if status["has_git"]:
+        kb.button(text="⬇️ git pull", callback_data=f"projpull_{project.key}")
+    kb.button(text="🔙 Ко всем проектам", callback_data="projects")
+    kb.adjust(1)
+    await callback.message.answer(text, reply_markup=kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("projpull_"))
+async def cb_project_pull(callback: CallbackQuery):
+    key = callback.data.split("_", 1)[1]
+    project = _projects.get_project(key)
+    if not project:
+        await callback.answer("Проект не найден")
+        return
+    wait = await callback.message.answer(f"⬇️ git pull {project.name}...")
+    result = await _projects.pull(project)
+    await wait.delete()
+    await callback.message.answer(f"*{project.name}* — результат pull:\n\n```\n{result}\n```")
+    await callback.answer()
+
+
 # ───── УВЕДОМЛЕНИЯ ─────
 
 @router.message(Command("notify"))
@@ -512,6 +594,7 @@ async def cmd_help(message: Message):
         "/newpost — создать пост из плана\n"
         "/tasks — открытые задачи\n"
         "/manage — панель управления\n"
+        "/projects — все проекты Олега (статус, git pull)\n"
         "/notify on|off — уведомления\n"
         "/coach — финансовый коуч\n"
         "/help — эта справка"
