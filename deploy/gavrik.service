@@ -1,0 +1,14 @@
+[Unit]
+Description=Gavrik Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/gavrik
+ExecStart=/root/gavrik/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+EnvironmentFile=/root/gavrik/.env
+
+[Install]
+WantedBy=multi-user.target

@@ -7,6 +7,8 @@ BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+# Fallback, если api.telegram.org недоступен напрямую с сервера (например http://user:pass@host:port)
+TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "")
 VK_TOKEN = os.getenv("VK_TOKEN", "")
 VK_GROUP_ID = int(os.getenv("VK_GROUP_ID", "227082800"))
 SITE_URL = os.getenv("SITE_URL", "https://palkina-therapy.ru")

@@ -3,9 +3,10 @@ import logging
 import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 
-from config import TELEGRAM_TOKEN
+from config import TELEGRAM_TOKEN, TELEGRAM_PROXY_URL
 import handlers
 
 logging.basicConfig(
@@ -21,8 +22,10 @@ async def main():
         log.error("TELEGRAM_TOKEN не задан в .env")
         sys.exit(1)
 
+    session = AiohttpSession(proxy=TELEGRAM_PROXY_URL) if TELEGRAM_PROXY_URL else None
     bot = Bot(
         token=TELEGRAM_TOKEN,
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
     )
     dp = Dispatcher()

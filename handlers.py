@@ -319,7 +319,7 @@ async def cb_plan(callback: CallbackQuery):
 
 async def _send_plan(message: Message):
     lines = ["*Контент-план ВКонтакте (12 постов, 4 недели)*\n"]
-    for num, day_week, topic, title in VK_POSTS:
+    for num, topic, title in VK_POSTS:
         lines.append(f"*{num}* — {topic}: {title}")
     lines.append("\n📄 Полный план: vk\\_content/content\\_plan.md")
     lines.append("Создать пост: /newpost")
@@ -403,7 +403,7 @@ async def cb_newpost_menu(callback: CallbackQuery):
 
 async def _send_newpost_menu(message: Message):
     kb = InlineKeyboardBuilder()
-    for i, (num, day_week, topic, title) in enumerate(VK_POSTS):
+    for i, (num, topic, title) in enumerate(VK_POSTS):
         kb.button(text=f"Пост {num}: {topic}", callback_data=f"post_{i}")
     kb.adjust(2)
     await message.answer(
@@ -417,7 +417,7 @@ async def _send_newpost_menu(message: Message):
 @router.callback_query(F.data.startswith("post_"))
 async def cb_post_detail(callback: CallbackQuery):
     idx = int(callback.data.split("_")[1])
-    num, day_week, topic, title = VK_POSTS[idx]
+    num, topic, title = VK_POSTS[idx]
     post_texts = _get_post_template(idx)
     kb = InlineKeyboardBuilder()
     kb.button(text="📋 Скопировать текст поста", callback_data=f"copy_{idx}")
@@ -435,7 +435,7 @@ async def cb_post_detail(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("copy_"))
 async def cb_copy_post(callback: CallbackQuery):
     idx = int(callback.data.split("_")[1])
-    num, day_week, topic, title = VK_POSTS[idx]
+    num, topic, title = VK_POSTS[idx]
     text = _get_post_template(idx)
     await callback.message.answer(
         f"Готово к копированию:\n\n{text}",
