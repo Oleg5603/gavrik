@@ -40,11 +40,13 @@ PROJECTS: list[Project] = [
     Project("periph-eyes", "PeriphEyes", r"C:\Users\HP\Проекты\oftalm\periph_eyes",
             "Windows-оверлей для тренировки периферийного зрения", linux_path="/home/agent/projects/PeriphEyes"),
     Project("sibvaleo", "Sibvaleo", r"C:\Users\HP\Проекты\sibvaleo",
-            "Flutter-приложение для консультантов Siberian Wellness", linux_path="/home/agent/projects/sibvaleo"),
+            "Flutter-приложение для консультантов Siberian Wellness", linux_path="/root/gavrik-projects/sibvaleo"),
     Project("sniper-ea", "Sniper EA", r"C:\Users\HP\Форекс\sniper_ea",
             "Торговый советник MT4 по золоту (XAUUSD)"),
     Project("gavrik", "Гаврик (этот бот)", r"C:\Users\HP\gavrik",
             "Telegram-бот управления проектом Светланы Палкиной", linux_path="/root/gavrik"),
+    Project("jurist", "Jurist", r"C:\Users\HP\Jurist",
+            "Веб-приложение для частного юриста РФ: чат по праву, генерация документов, анализ договоров (FastAPI + OpenRouter)"),
 ]
 
 
