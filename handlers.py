@@ -506,10 +506,18 @@ async def cb_project_detail(callback: CallbackQuery):
     status = await _projects.get_status(project)
     await wait.delete()
 
+    can_deploy = False
     if not status["synced"]:
         text = (
             f"*{project.name}*\n{project.description}\n\n"
             f"🚫 Не синхронизирован на этой машине (путь на ПК: `{project.win_path}`)"
+        )
+    elif not status["exists"] and project.repo_url:
+        can_deploy = True
+        text = (
+            f"*{project.name}*\n{project.description}\n\n"
+            f"📦 Ещё не развёрнут на сервере (репозиторий известен: `{project.repo_url}`)\n"
+            f"Нажми «Развернуть на сервере», чтобы склонировать в `{project.path}`."
         )
     elif not status["exists"]:
         text = f"*{project.name}*\n\n❌ Путь не найден: `{project.path}`"
@@ -528,11 +536,27 @@ async def cb_project_detail(callback: CallbackQuery):
         )
 
     kb = InlineKeyboardBuilder()
+    if can_deploy:
+        kb.button(text="🚀 Развернуть на сервере", callback_data=f"projdeploy_{project.key}")
     if status["has_git"]:
         kb.button(text="⬇️ git pull", callback_data=f"projpull_{project.key}")
     kb.button(text="🔙 Ко всем проектам", callback_data="projects")
     kb.adjust(1)
     await callback.message.answer(text, reply_markup=kb.as_markup())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("projdeploy_"))
+async def cb_project_deploy(callback: CallbackQuery):
+    key = callback.data.split("_", 1)[1]
+    project = _projects.get_project(key)
+    if not project:
+        await callback.answer("Проект не найден")
+        return
+    wait = await callback.message.answer(f"🚀 Разворачиваю {project.name} на сервере...")
+    result = await _projects.deploy(project)
+    await wait.delete()
+    await callback.message.answer(f"*{project.name}* — результат развёртывания:\n\n```\n{result}\n```")
     await callback.answer()
 
 

@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+DEFAULT_DEPLOY_ROOT = "/root/gavrik-projects"
+
+
 @dataclass
 class Project:
     key: str
@@ -15,26 +18,37 @@ class Project:
     win_path: str
     description: str
     linux_path: str | None = None  # None = ещё не синхронизирован на VPS
+    repo_url: str | None = None  # GitHub-репозиторий — если задан, бот может сам склонировать на VPS
 
     @property
     def path(self) -> Path | None:
-        raw = self.linux_path if os.name != "nt" else self.win_path
-        return Path(raw) if raw else None
+        if os.name == "nt":
+            return Path(self.win_path) if self.win_path else None
+        if self.linux_path:
+            return Path(self.linux_path)
+        if self.repo_url:
+            # Ещё не разворачивали на сервере, но знаем откуда клонировать —
+            # это то место, куда ляжет проект после нажатия «Развернуть на сервере».
+            return Path(DEFAULT_DEPLOY_ROOT) / self.key
+        return None
 
 
 PROJECTS: list[Project] = [
     Project("jarvis-gold", "Jarvis Gold (монорепо)", r"C:\Users\HP\Documents\Project",
             "Основной рабочий репозиторий: подпроекты, боты, торговые советники"),
     Project("keen-lead-scoop", "Keen Lead Scoop", r"C:\Users\HP\Documents\Project\keen-lead-scoop",
-            "Дашборд лидов, TanStack Start/React, Lovable.dev"),
+            "Дашборд лидов, TanStack Start/React, Lovable.dev",
+            repo_url="https://github.com/Oleg5603/keen-lead-scoop.git"),
     Project("jarvis-architect", "Jarvis Architect", r"C:\Users\HP\jarvis-architect",
             "Шаблон персонального AI-агента на Claude Code + Telegram-бот", linux_path="/root/jarvis-architect"),
     Project("graphify", "Graphify", r"C:\Users\HP\graphify",
             "Codebase → knowledge graph, PyPI-пакет, YC S26"),
     Project("sleep-cube", "Sleep Cube", r"C:\Users\HP\sleep-cube",
-            "Android-приложение для сна, Kotlin/Compose"),
+            "Android-приложение для сна, Kotlin/Compose",
+            repo_url="https://github.com/Oleg5603/sleep-cube.git"),
     Project("tkm", "ТКМ", r"C:\Users\HP\tkm",
-            "Подбор точек ТКМ, Python десктоп + Flask веб"),
+            "Подбор точек ТКМ, Python десктоп + Flask веб",
+            repo_url="https://github.com/Oleg5603/tkm-acupuncture.git"),
     Project("galactic-academy", "Galactic Academy", r"C:\Users\HP\Проекты\galactic_academy",
             "PDF-ридер с озвучкой голосами Star Wars", linux_path="/home/agent/projects/galactic-academy"),
     Project("periph-eyes", "PeriphEyes", r"C:\Users\HP\Проекты\oftalm\periph_eyes",
@@ -99,6 +113,29 @@ async def pull(project: Project) -> str:
     if not (project.path / ".git").exists():
         return "Не git-репозиторий."
     return await _run_git(project.path, "pull") or "Нет изменений или ошибка pull."
+
+
+async def deploy(project: Project) -> str:
+    """Клонирует project.repo_url в project.path (только если ещё не там)."""
+    if not project.repo_url:
+        return "Для этого проекта не задан GitHub-репозиторий — клонировать некуда."
+    if project.path is None:
+        return "Не удалось определить путь для развёртывания."
+    if (project.path / ".git").exists():
+        return "Уже развёрнут — используй git pull."
+    project.path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", project.repo_url, str(project.path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if proc.returncode != 0:
+            return f"Ошибка клонирования:\n{stderr.decode('utf-8', errors='replace').strip()}"
+        return f"Склонировано в {project.path}."
+    except Exception as e:
+        return f"Ошибка клонирования: {e}"
 
 
 def context_summary() -> str:
