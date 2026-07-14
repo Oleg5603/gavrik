@@ -40,7 +40,11 @@ PROJECTS: list[Project] = [
             "Дашборд лидов, TanStack Start/React, Lovable.dev",
             repo_url="https://github.com/Oleg5603/keen-lead-scoop.git"),
     Project("jarvis-architect", "Jarvis Architect", r"C:\Users\HP\jarvis-architect",
-            "Шаблон персонального AI-агента на Claude Code + Telegram-бот", linux_path="/root/jarvis-architect"),
+            "Не отдельный бот, а мастерская-субагент: набор скиллов Claude Code для установки новых "
+            "агентов на VPS (server-setup), напоминаний (reminder) и разработки (discovery-interview, "
+            "frontend-design, fullstack-developer). Также держит runbook для восстановления самого Гаврика "
+            "(knowledge/gavrik-recovery.md) — Гавр использует его как справочник при сбоях.",
+            linux_path="/root/jarvis-architect"),
     Project("graphify", "Graphify", r"C:\Users\HP\graphify",
             "Codebase → knowledge graph, PyPI-пакет, YC S26"),
     Project("sleep-cube", "Sleep Cube", r"C:\Users\HP\sleep-cube",
