@@ -834,8 +834,28 @@ async def cb_coach_preset(callback: CallbackQuery):
     if not preset_prompt:
         await callback.answer("Неизвестная тема")
         return
-    wait = await callback.message.answer("💭 Коуч думает...")
-    result = await _ask_ai(COACH_SYSTEM, preset_prompt, callback.message.chat.id)
+    wait = await callback.message.answer("💭 Коуч думает... (0с)")
+
+    done_event = asyncio.Event()
+    async def _ticker():
+        elapsed = 0
+        while not done_event.is_set():
+            await asyncio.sleep(10)
+            if done_event.is_set():
+                break
+            elapsed += 10
+            try:
+                await wait.edit_text(f"💭 Коуч думает... ({elapsed}с)")
+            except Exception:
+                pass
+    ticker_task = asyncio.create_task(_ticker())
+
+    try:
+        result = await _ask_ai(COACH_SYSTEM, preset_prompt, callback.message.chat.id)
+    finally:
+        done_event.set()
+        ticker_task.cancel()
+
     await wait.delete()
     for i in range(0, len(result), 4000):
         await callback.message.answer(result[i:i+4000], reply_markup=_coach_kb() if i + 4000 >= len(result) else None)
@@ -881,15 +901,37 @@ async def _dispatch_coach(message: Message):
         await message.answer(result[i:i+4000], reply_markup=_coach_kb() if i + 4000 >= len(result) else None)
 
 
+def _session_history_text(chat_id: int | None) -> str:
+    """Форматирует последние сообщения текущей сессии для подстановки в промпт."""
+    if chat_id is None:
+        return ""
+    session = _history.get(chat_id, [])
+    if not session:
+        return ""
+    lines = "\n".join(
+        f"{'Пользователь' if r == 'user' else 'Агент'}: {t}"
+        for r, t in session[-12:]
+    )
+    return f"\n\n=== ИСТОРИЯ ТЕКУЩЕЙ СЕССИИ ===\n{lines}"
+
+
 async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = None) -> str:
     """
     Единая точка вызова AI.
-    1. Если ANTHROPIC_API_KEY — прямой SDK (быстро, надёжно).
-    2. Иначе — subprocess claude через cmd /c + stdin (работает на Windows).
+    1. Если ANTHROPIC_API_KEY — прямой SDK (быстро, надёжно), история идёт как messages[].
+    2. Иначе — subprocess claude через cmd /c + stdin (работает на Windows);
+       здесь claude --print не хранит состояние между вызовами, поэтому история
+       сессии подставляется в текст промпта явно.
     """
     if ANTHROPIC_API_KEY:
         return await _run_anthropic_sdk(system_prompt, user_message, chat_id)
-    return await _run_claude_subprocess(system_prompt + "\n\n" + user_message)
+    full_prompt = (
+        system_prompt
+        + _session_history_text(chat_id)
+        + "\n\n=== НОВОЕ СООБЩЕНИЕ ===\n"
+        + user_message
+    )
+    return await _run_claude_subprocess(full_prompt)
 
 
 async def _run_anthropic_sdk(system_prompt: str, user_message: str, chat_id: int | None) -> str:
@@ -937,7 +979,7 @@ async def _run_claude_subprocess(full_prompt: str) -> str:
         )
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(input=full_prompt.encode("utf-8", errors="replace")),
-            timeout=60,
+            timeout=600,
         )
         result = stdout.decode("utf-8", errors="replace").strip()
         if not result:
@@ -948,7 +990,7 @@ async def _run_claude_subprocess(full_prompt: str) -> str:
             proc.kill()
         except Exception:
             pass
-        return "⏱ Таймаут 60с."
+        return "⏱ Таймаут 10 минут — claude не ответил, попробуй разбить запрос на части."
     except Exception as e:
         return f"❌ Ошибка subprocess: {e}"
 
