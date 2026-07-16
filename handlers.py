@@ -4,7 +4,7 @@ import asyncio
 import sys
 import aiohttp
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -17,6 +17,7 @@ from config import (
 import json as _json_mod
 from memory_graph import MemoryGraph
 import projects_registry as _projects
+import vk_lead_parser as _lead_parser
 
 _memory = MemoryGraph(BASE_DIR / "knowledge_graph.jsonl")
 _SESSIONS_FILE = BASE_DIR / "sessions.json"
@@ -630,8 +631,92 @@ async def cmd_help(message: Message):
         "/projects — все проекты Олега (статус, git pull)\n"
         "/notify on|off — уведомления\n"
         "/coach — финансовый коуч\n"
+        "/leads группы;города — парсинг похожей аудитории ВК (Этап 4)\n"
         "/help — эта справка"
     )
+
+
+# ───── ПАРСИНГ АУДИТОРИИ ВК (Этап 4) ─────
+
+_LEADS_OUT_PATH = str(BASE_DIR / "leads.csv")
+
+
+@router.message(Command("leads"))
+async def cmd_leads(message: Message):
+    """
+    /leads misemia,other_group|Чайковский,Пермь
+    Часть до "|" — группы-доноры через запятую, часть после — города-фильтр
+    (можно опустить вместе с "|" — тогда без фильтра по городу).
+    Без аргументов — группа по умолчанию (VK_GROUP_ID проекта), без фильтра.
+    """
+    if not _auth(message):
+        return
+    if not VK_TOKEN:
+        await message.answer("❌ VK_TOKEN не задан в .env — парсинг недоступен.")
+        return
+
+    raw = message.text.partition(" ")[2].strip()
+    if raw:
+        groups_part, _, cities_part = raw.partition("|")
+        groups = [g.strip() for g in groups_part.split(",") if g.strip()]
+        cities = [c.strip() for c in cities_part.split(",") if c.strip()] or None
+    else:
+        groups = [str(VK_GROUP_ID)]
+        cities = None
+
+    wait = await message.answer(f"🔍 Парсю аудиторию ({', '.join(groups)})... (0с)")
+
+    done_event = asyncio.Event()
+    async def _ticker():
+        elapsed = 0
+        while not done_event.is_set():
+            await asyncio.sleep(10)
+            if done_event.is_set():
+                break
+            elapsed += 10
+            try:
+                await wait.edit_text(f"🔍 Парсю аудиторию ({', '.join(groups)})... ({elapsed}с)")
+            except Exception:
+                pass
+    ticker_task = asyncio.create_task(_ticker())
+
+    def _run_parser() -> tuple[int, int, int, str | None]:
+        all_leads = []
+        for raw_group in groups:
+            try:
+                group_id = _lead_parser.resolve_group_id(raw_group)
+                all_leads.extend(_lead_parser.fetch_group_members(group_id, source_label=raw_group))
+            except Exception as e:
+                log.warning("lead-parser: группа '%s' пропущена: %s", raw_group, e)
+        filtered = _lead_parser.filter_leads(all_leads, cities, max_days_inactive=30)
+        deduped = _lead_parser.dedup_leads(filtered)
+        if not deduped:
+            return len(all_leads), 0, 0, None
+        _lead_parser.write_csv(deduped, _LEADS_OUT_PATH)
+        return len(all_leads), len(filtered), len(deduped), _LEADS_OUT_PATH
+
+    try:
+        total, after_filter, deduped_count, out_path = await asyncio.get_event_loop().run_in_executor(
+            None, _run_parser
+        )
+    except Exception as e:
+        done_event.set()
+        ticker_task.cancel()
+        await wait.edit_text(f"❌ Ошибка парсинга: {e}")
+        return
+    finally:
+        done_event.set()
+        ticker_task.cancel()
+
+    await wait.delete()
+    await message.answer(
+        f"Готово: собрано {total}, после фильтра города/активности {after_filter}, "
+        f"после дедупликации {deduped_count}."
+    )
+    if out_path:
+        await message.answer_document(FSInputFile(out_path), caption="leads.csv")
+    else:
+        await message.answer("Никого не осталось после фильтра — попробуй без фильтра городов или другие группы.")
 
 
 # ───── АГЕНТ ─────
