@@ -33,3 +33,7 @@ LANDING_DIR = PROJECT_ROOT / "landing"
 
 # ContentZavod — публикация для Олега (см. content_zavod/clients/oleg/platforms.md)
 OLEG_TG_CHANNEL = os.getenv("OLEG_TG_CHANNEL", "")
+
+# ContentZavod — генерация картинок (YandexART / AI Studio)
+YANDEX_ART_FOLDER_ID = os.getenv("YANDEX_ART_FOLDER_ID", "")
+YANDEX_ART_API_KEY = os.getenv("YANDEX_ART_API_KEY", "")

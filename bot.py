@@ -46,6 +46,18 @@ def _acquire_single_instance_lock():
     return lock_file  # держим открытым на весь процесс — лок снимается при выходе
 
 
+async def _cz_scheduler_loop(bot: Bot):
+    """Раз в 5 минут проверяет очередь публикаций ContentZavod (см.
+    handlers.cz_run_scheduler_tick) — отдельная задача, не блокирует
+    поллинг Telegram-апдейтов."""
+    while True:
+        try:
+            await handlers.cz_run_scheduler_tick(bot)
+        except Exception:
+            log.exception("cz_scheduler_loop: тик провалился")
+        await asyncio.sleep(300)
+
+
 async def main():
     if not TELEGRAM_TOKEN:
         log.error("TELEGRAM_TOKEN не задан в .env")
@@ -68,6 +80,8 @@ async def main():
         # не перезапустит. Логируем и продолжаем поллинг остальных апдейтов.
         log.exception("Необработанная ошибка в хендлере: %s", event.exception)
         return True
+
+    asyncio.create_task(_cz_scheduler_loop(bot))
 
     log.info("Гаврик запущен.")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query"])

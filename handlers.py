@@ -1,11 +1,14 @@
+import base64
 import logging
 import subprocess
 import asyncio
 import sys
+from datetime import datetime, timedelta, time as dt_time
+from pathlib import Path
 import aiohttp
 from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery, FSInputFile, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -14,6 +17,7 @@ from config import (
     CONTENT_PLAN_PATH, DIRECT_CSV_PATH, LANDING_DIR, ALLOWED_USER_IDS,
     VPS_HOST, VPS_USER, VPS_PASSWORD, CLAUDE_BIN, BASE_DIR,
     ANTHROPIC_API_KEY, ANTHROPIC_MODEL, OLEG_TG_CHANNEL,
+    YANDEX_ART_FOLDER_ID, YANDEX_ART_API_KEY,
 )
 import json as _json_mod
 from memory_graph import MemoryGraph
@@ -760,8 +764,15 @@ async def cmd_leads(message: Message):
 # ───── CONTENTZAVOD — публикация в Telegram (Фаза 4, только ТГ) ─────
 # ВК публикуется вручную (см. content_zavod/clients/oleg/platforms.md —
 # VK-токен заблокирован модерацией VK, не наш баг).
+#
+# Одобрение ставит пост в очередь на публикацию (1/день в CZ_DAILY_HOUR:00,
+# будни), а не публикует мгновенно — решено 2026-07-17. Фоновый шедулер
+# в bot.py разбирает очередь. Картинка (Kandinsky/FusionBrain) генерируется
+# сразу при одобрении, чтобы сбой генерации был виден сейчас, а не молча
+# в 10 утра без присмотра.
 
 _CZ_DIR = BASE_DIR / "content_zavod"
+CZ_DAILY_HOUR = 10  # публикация в 10:00, см. решение пользователя 2026-07-17
 
 
 def _cz_latest_drafts_path(client: str):
@@ -791,6 +802,73 @@ def _cz_save_publish_state(client: str, batch_filename: str, decisions: dict):
     )
 
 
+def _cz_next_slot(decisions: dict) -> datetime:
+    """Следующий свободный будний день в CZ_DAILY_HOUR:00 — пропускает
+    сб/вс (см. VK_PROMOTION_REQUIREMENTS: окна для аудитории предпринимателей
+    только в будни) и не занятые другими scheduled/published слотами даты."""
+    taken_dates = set()
+    for d in decisions.values():
+        if isinstance(d, dict) and d.get("at"):
+            taken_dates.add(datetime.fromisoformat(d["at"]).date())
+
+    now = datetime.now()
+    candidate = now.date()
+    if now.time() >= dt_time(CZ_DAILY_HOUR, 0):
+        candidate += timedelta(days=1)
+
+    while candidate.weekday() >= 5 or candidate in taken_dates:  # 5=сб, 6=вс
+        candidate += timedelta(days=1)
+
+    return datetime.combine(candidate, dt_time(CZ_DAILY_HOUR, 0))
+
+
+_YANDEX_ART_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/imageGenerationAsync"
+_YANDEX_OPERATIONS_URL = "https://llm.api.cloud.yandex.net/operations/"
+
+
+async def _cz_generate_image(prompt: str) -> bytes | None:
+    """YandexART (Yandex Cloud AI Studio) — обложка к посту. Возвращает
+    None при отсутствии ключей или ошибке (публикация не должна падать
+    целиком из-за картинки — просто уйдёт текстом). Переключились с
+    Kandinsky/FusionBrain 2026-07-17 — тот сайт был недоступен."""
+    if not YANDEX_ART_FOLDER_ID or not YANDEX_ART_API_KEY:
+        return None
+    headers = {"Authorization": f"Api-Key {YANDEX_ART_API_KEY}"}
+    payload = {
+        "modelUri": f"art://{YANDEX_ART_FOLDER_ID}/yandex-art/latest",
+        "generationOptions": {"seed": "42", "aspectRatio": {"widthRatio": 1, "heightRatio": 1}},
+        "messages": [{"weight": 1, "text": prompt}],
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(_YANDEX_ART_URL, headers=headers, json=payload) as resp:
+                resp.raise_for_status()
+                run_data = await resp.json()
+            operation_id = run_data["id"]
+
+            status_url = _YANDEX_OPERATIONS_URL + operation_id
+            for _ in range(20):  # до ~100с ожидания генерации
+                await asyncio.sleep(5)
+                async with session.get(status_url, headers=headers) as resp:
+                    resp.raise_for_status()
+                    status_data = await resp.json()
+                if status_data.get("done"):
+                    if "error" in status_data:
+                        log.warning("YandexART: генерация провалилась: %s", status_data["error"])
+                        return None
+                    image_b64 = status_data["response"]["image"]
+                    return base64.b64decode(image_b64)
+            log.warning("YandexART: таймаут ожидания генерации")
+            return None
+    except Exception as e:
+        log.warning("YandexART: ошибка генерации картинки: %s", e)
+        return None
+
+
+def _cz_image_path(client: str, idx: int) -> Path:
+    return _CZ_DIR / "clients" / client / "drafts" / "images" / f"{idx}.png"
+
+
 def _cz_draft_card_text(draft: dict, idx: int, total: int) -> str:
     return (
         f"*[{idx + 1}/{total}] {draft.get('topic', '')}*\n\n"
@@ -802,7 +880,7 @@ def _cz_draft_card_text(draft: dict, idx: int, total: int) -> str:
 
 def _cz_draft_kb(idx: int):
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Опубликовать в ТГ", callback_data=f"cz_pub:{idx}")
+    kb.button(text="✅ Одобрить (в очередь)", callback_data=f"cz_pub:{idx}")
     kb.button(text="⏭ Пропустить", callback_data=f"cz_skip:{idx}")
     kb.adjust(2)
     return kb.as_markup()
@@ -818,7 +896,7 @@ async def _cz_send_next(chat_id: int, bot: Bot, client: str):
 
     pending = [i for i in range(len(drafts)) if str(i) not in decisions]
     if not pending:
-        await bot.send_message(chat_id, "Все темы этой пачки уже обработаны (опубликованы или пропущены).")
+        await bot.send_message(chat_id, "Все темы этой пачки уже обработаны (в очереди, опубликованы или пропущены).")
         return
 
     idx = pending[0]
@@ -855,24 +933,37 @@ async def cb_cz_publish_one(callback: CallbackQuery, bot: Bot):
     drafts = _json_mod.loads(drafts_path.read_text(encoding="utf-8"))
     draft = drafts[idx]
 
-    try:
-        await bot.send_message(OLEG_TG_CHANNEL, draft.get("tg_post", ""), parse_mode="Markdown")
-    except TelegramBadRequest as e:
-        if "can't parse entities" in str(e):
-            await bot.send_message(OLEG_TG_CHANNEL, draft.get("tg_post", ""), parse_mode=None)
-        else:
-            await callback.answer(f"Ошибка публикации: {e}", show_alert=True)
-            return
-    except Exception as e:
-        await callback.answer(f"Ошибка публикации: {e}", show_alert=True)
-        return
-
     decisions = _cz_load_publish_state(client, drafts_path.name)
-    decisions[str(idx)] = "published"
+    slot = _cz_next_slot(decisions)
+
+    image_note = ""
+    if YANDEX_ART_FOLDER_ID and YANDEX_ART_API_KEY:
+        await callback.answer("Ставлю в очередь, генерирую картинку...")
+        prompt = (
+            f"Фото-иллюстрация к посту на тему: {draft.get('topic', '')}. "
+            "Стиль: минималистичный, деловой, IT/технологии, реалистичное фото "
+            "или чистая плоская иллюстрация. БЕЗ текста и надписей на картинке."
+        )
+        image_bytes = await _cz_generate_image(prompt)
+        if image_bytes:
+            img_path = _cz_image_path(client, idx)
+            img_path.parent.mkdir(parents=True, exist_ok=True)
+            img_path.write_bytes(image_bytes)
+            image_note = "\n🖼 Картинка сгенерирована."
+        else:
+            image_note = "\n⚠ Картинка не сгенерировалась — уйдёт текстом."
+    else:
+        await callback.answer("Ставлю в очередь")
+
+    decisions[str(idx)] = {"status": "scheduled", "at": slot.isoformat()}
     _cz_save_publish_state(client, drafts_path.name, decisions)
 
-    await _safe_edit(callback.message, callback.message.text + "\n\n✅ *Опубликовано в @textprodv*", reply_markup=None)
-    await callback.answer("Опубликовано")
+    date_str = slot.strftime("%d.%m.%Y %H:%M")
+    await _safe_edit(
+        callback.message,
+        callback.message.text + f"\n\n🗓 *Запланировано на {date_str}*{image_note}",
+        reply_markup=None,
+    )
     await _cz_send_next(callback.message.chat.id, bot, client)
 
 
@@ -888,12 +979,76 @@ async def cb_cz_skip_one(callback: CallbackQuery, bot: Bot):
         return
 
     decisions = _cz_load_publish_state(client, drafts_path.name)
-    decisions[str(idx)] = "skipped"
+    decisions[str(idx)] = {"status": "skipped"}
     _cz_save_publish_state(client, drafts_path.name, decisions)
 
     await _safe_edit(callback.message, callback.message.text + "\n\n⏭ *Пропущено*", reply_markup=None)
     await callback.answer("Пропущено")
     await _cz_send_next(callback.message.chat.id, bot, client)
+
+
+async def cz_run_scheduler_tick(bot: Bot):
+    """Вызывается фоновым циклом из bot.py каждые несколько минут — публикует
+    все темы, чей запланированный слот уже наступил. Один тик может
+    опубликовать сразу несколько клиентов/тем, если накопилось (например
+    бот был выключен дольше суток) — не привязано жёстко к одной теме за тик."""
+    client = "oleg"
+    if not OLEG_TG_CHANNEL:
+        return
+    drafts_path = _cz_latest_drafts_path(client)
+    if drafts_path is None:
+        return
+    drafts = _json_mod.loads(drafts_path.read_text(encoding="utf-8"))
+    decisions = _cz_load_publish_state(client, drafts_path.name)
+    now = datetime.now()
+    changed = False
+
+    for idx_str, decision in list(decisions.items()):
+        if not isinstance(decision, dict) or decision.get("status") != "scheduled":
+            continue
+        if datetime.fromisoformat(decision["at"]) > now:
+            continue
+
+        idx = int(idx_str)
+        draft = drafts[idx]
+        img_path = _cz_image_path(client, idx)
+        caption = draft.get("tg_post", "")
+
+        try:
+            if img_path.exists():
+                await bot.send_photo(
+                    OLEG_TG_CHANNEL, BufferedInputFile(img_path.read_bytes(), filename="cover.png"),
+                    caption=caption, parse_mode="Markdown",
+                )
+            else:
+                await bot.send_message(OLEG_TG_CHANNEL, caption, parse_mode="Markdown")
+        except TelegramBadRequest as e:
+            if "can't parse entities" in str(e):
+                if img_path.exists():
+                    await bot.send_photo(
+                        OLEG_TG_CHANNEL, BufferedInputFile(img_path.read_bytes(), filename="cover.png"),
+                        caption=caption, parse_mode=None,
+                    )
+                else:
+                    await bot.send_message(OLEG_TG_CHANNEL, caption, parse_mode=None)
+            else:
+                log.exception("cz_run_scheduler_tick: публикация темы %s провалилась", idx)
+                continue
+        except Exception:
+            log.exception("cz_run_scheduler_tick: публикация темы %s провалилась", idx)
+            continue
+
+        decision["status"] = "published"
+        changed = True
+
+        for chat_id in ALLOWED_USER_IDS:
+            try:
+                await bot.send_message(chat_id, f"✅ Опубликовано в @textprodv: «{draft.get('topic', '')}»")
+            except Exception:
+                pass
+
+    if changed:
+        _cz_save_publish_state(client, drafts_path.name, decisions)
 
 
 # ───── АГЕНТ ─────
