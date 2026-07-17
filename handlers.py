@@ -844,7 +844,7 @@ async def cmd_cz_publish(message: Message, bot: Bot):
 
 @router.callback_query(F.data.startswith("cz_pub:"))
 async def cb_cz_publish_one(callback: CallbackQuery, bot: Bot):
-    if not _auth(callback.message):
+    if not _auth(callback):
         return
     idx = int(callback.data.split(":", 1)[1])
     client = "oleg"
@@ -878,7 +878,7 @@ async def cb_cz_publish_one(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("cz_skip:"))
 async def cb_cz_skip_one(callback: CallbackQuery, bot: Bot):
-    if not _auth(callback.message):
+    if not _auth(callback):
         return
     idx = int(callback.data.split(":", 1)[1])
     client = "oleg"
