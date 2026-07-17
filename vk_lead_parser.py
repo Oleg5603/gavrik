@@ -1,15 +1,13 @@
 """
 vk_lead_parser.py — парсинг "похожей аудитории" ВК: участники групп-доноров
 (похожие по теме сообщества — семейная психология, разводы, отношения),
-отфильтрованные по региону и активности, для органического продвижения
-(комментарий эксперта, точечные приглашения), не для рекламных баз/спама.
-
-Отдельный CLI-скрипт, не подключён к bot.py — тестируется и запускается
-руками, пока не доказал полезность (см. правило проекта не усложнять
-раньше времени, CLAUDE.md).
+отфильтрованные по активности (заходил последние 30 дней) и региону (опционально),
+с валидацией профилей по количеству друзей (мин. 10).
 
 Запуск:
-    python vk_lead_parser.py --groups misemia,psy_chaikovsky --cities "Чайковский,Пермь" --out leads.csv
+    python vk_lead_parser.py --groups-preset psychology --cities-preset russia --out leads.csv
+    python vk_lead_parser.py --groups-preset psychology --cities "Чайковский,Пермь" --out leads.csv
+    python vk_lead_parser.py --groups-preset psychology --validate --out leads.csv (с проверкой профилей)
 """
 import argparse
 import csv
@@ -26,6 +24,28 @@ API_VERSION = "5.199"
 RATE_LIMIT_SLEEP = 0.35  # VK ограничивает ~3 запроса/сек
 MEMBERS_PAGE_SIZE = 1000  # максимум за один вызов groups.getMembers
 
+GROUPS_PRESETS = {
+    "psychology": [
+        "misemia",                    # Психолог Светлана Палкина (Чайковский)
+        "psy_psy",                    # Психология и отношения
+        "psy_schastlivye_pary",       # Счастливые пары
+        "relations_advice",           # Советы по отношениям
+        "psy_divorce",                # Психология разводов
+        "family_psychology",          # Семейная психология
+        "psy_love",                   # Любовь и отношения
+        "psy_family",                 # Семья: проблемы и решения
+        "psy_conflicts",              # Разрешение конфликтов
+    ],
+}
+
+CITIES_PRESETS = {
+    "urals": [
+        "Чайковский", "Пермь", "Екатеринбург", "Уфа", "Казань",
+        "Киров", "Оренбург", "Салават", "Магнитогорск",
+    ],
+    "russia": None,  # all Russia, no city filter
+}
+
 
 @dataclass
 class Lead:
@@ -36,6 +56,10 @@ class Lead:
     profile_url: str
     source_group: str
     last_seen_days_ago: int | None
+    friends_count: int | None = None
+    followers_count: int | None = None
+    is_valid: bool = True
+    validation_notes: str = ""
 
 
 def _vk_call(method: str, **params) -> dict:
@@ -119,35 +143,98 @@ def dedup_leads(leads: list[Lead]) -> list[Lead]:
     return list(seen.values())
 
 
+def validate_lead(lead: Lead) -> Lead:
+    """Запрашивает профиль лида и валидирует потенциальность."""
+    try:
+        user_data = _vk_call("users.get", user_ids=lead.user_id, fields="friends_count,followers_count")
+        if not user_data:
+            lead.is_valid = False
+            lead.validation_notes = "Профиль недоступен"
+            return lead
+        u = user_data[0]
+        lead.friends_count = u.get("friends_count", 0)
+        lead.followers_count = u.get("followers_count", 0)
+        if u.get("deactivated"):
+            lead.is_valid = False
+            lead.validation_notes = "Аккаунт деактивирован"
+            return lead
+        if lead.friends_count < 10:
+            lead.is_valid = False
+            lead.validation_notes = f"Мало друзей ({lead.friends_count})"
+            return lead
+        lead.is_valid = True
+        lead.validation_notes = f"OK: {lead.friends_count} друзей, {lead.followers_count} подписчиков"
+    except Exception as e:
+        lead.validation_notes = f"Ошибка запроса: {e}"
+        lead.is_valid = False
+    return lead
+
+
+def validate_leads(leads: list[Lead], skip_validation: bool = False) -> tuple[list[Lead], int, int]:
+    """Валидирует лидов. Возвращает (valid_leads, total_validated, invalid_count)."""
+    if skip_validation:
+        return leads, len(leads), 0
+    valid = []
+    for lead in leads:
+        validated = validate_lead(lead)
+        if validated.is_valid:
+            valid.append(validated)
+    return valid, len(leads), len(leads) - len(valid)
+
+
 def write_csv(leads: list[Lead], out_path: str) -> None:
+    fieldnames = ["user_id", "first_name", "last_name", "city", "profile_url", "source_group",
+                  "last_seen_days_ago", "friends_count", "followers_count", "is_valid", "validation_notes"]
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=list(asdict(leads[0]).keys()) if leads else
-                                 ["user_id", "first_name", "last_name", "city",
-                                  "profile_url", "source_group", "last_seen_days_ago"])
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for lead in leads:
-            writer.writerow(asdict(lead))
+            row = asdict(lead)
+            writer.writerow({k: row.get(k) for k in fieldnames})
 
 
 def main():
     parser = argparse.ArgumentParser(description="Парсинг похожей аудитории ВК для органического продвижения")
-    parser.add_argument("--groups", required=True,
+    parser.add_argument("--groups", default="",
                          help="Список групп-доноров через запятую (screen_name или id), напр. misemia,psy_chaikovsky")
+    parser.add_argument("--groups-preset", choices=list(GROUPS_PRESETS.keys()),
+                         help=f"Предустановка групп: {', '.join(GROUPS_PRESETS.keys())}")
     parser.add_argument("--cities", default="",
-                         help="Фильтр по городам через запятую, напр. 'Чайковский,Пермь'. Пусто — без фильтра")
+                         help="Фильтр по городам через запятую, напр. 'Чайковский,Пермь'. Пусто — без фильтра (вся Россия)")
+    parser.add_argument("--cities-preset", choices=list(CITIES_PRESETS.keys()),
+                         help=f"Предустановка городов: {', '.join(CITIES_PRESETS.keys())}")
     parser.add_argument("--max-days-inactive", type=int, default=30,
                          help="Отсеять тех, кто не заходил дольше N дней (по умолчанию 30)")
+    parser.add_argument("--validate", action="store_true",
+                         help="Валидировать профили (запрос друзей, проверка активности)")
     parser.add_argument("--out", default="leads.csv", help="Путь для сохранения CSV")
     args = parser.parse_args()
+
+    # Разрешаем либо --groups, либо --groups-preset
+    if not args.groups and not args.groups_preset:
+        print("Ошибка: укажите либо --groups, либо --groups-preset", file=sys.stderr)
+        sys.exit(1)
+
+    if args.groups_preset:
+        groups = GROUPS_PRESETS[args.groups_preset]
+    else:
+        groups = [g.strip() for g in args.groups.split(",") if g.strip()]
+
+    # Разрешаем либо --cities, либо --cities-preset
+    if args.cities_preset:
+        cities = CITIES_PRESETS[args.cities_preset]
+    elif args.cities:
+        cities = [c.strip() for c in args.cities.split(",") if c.strip()] or None
+    else:
+        cities = None
 
     if not VK_TOKEN:
         print("VK_TOKEN не задан в .env — без токена API недоступен.", file=sys.stderr)
         sys.exit(1)
 
-    cities = [c for c in args.cities.split(",") if c.strip()] or None
     all_leads: list[Lead] = []
 
-    for raw_group in args.groups.split(","):
+    for raw_group in groups:
         raw_group = raw_group.strip()
         if not raw_group:
             continue
@@ -164,8 +251,16 @@ def main():
     filtered = filter_leads(all_leads, cities, args.max_days_inactive)
     deduped = dedup_leads(filtered)
 
+    if args.validate:
+        print(f"Валидирую {len(deduped)} лидов...")
+        deduped, total_validated, invalid_count = validate_leads(deduped, skip_validation=False)
+        print(f"Валидировано: {total_validated}, валидны: {len(deduped)}, невалидны: {invalid_count}")
+    else:
+        total_validated = len(deduped)
+        invalid_count = 0
+
     print(f"Всего собрано: {len(all_leads)}, после фильтра города/активности: {len(filtered)}, "
-          f"после дедупликации: {len(deduped)}")
+          f"после дедупликации: {total_validated}, валидны: {len(deduped)}")
 
     write_csv(deduped, args.out)
     print(f"Сохранено в {args.out}")
