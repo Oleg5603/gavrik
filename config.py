@@ -30,3 +30,6 @@ PROJECT_ROOT = BASE_DIR.parent
 CONTENT_PLAN_PATH = PROJECT_ROOT / "vk_content" / "content_plan.md"
 DIRECT_CSV_PATH = PROJECT_ROOT / "output" / "direct_campaign.csv"
 LANDING_DIR = PROJECT_ROOT / "landing"
+
+# ContentZavod — публикация для Олега (см. content_zavod/clients/oleg/platforms.md)
+OLEG_TG_CHANNEL = os.getenv("OLEG_TG_CHANNEL", "")

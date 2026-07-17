@@ -3,7 +3,7 @@ import subprocess
 import asyncio
 import sys
 import aiohttp
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import Command
@@ -13,7 +13,7 @@ from config import (
     VK_TOKEN, VK_GROUP_ID, SITE_URL,
     CONTENT_PLAN_PATH, DIRECT_CSV_PATH, LANDING_DIR, ALLOWED_USER_IDS,
     VPS_HOST, VPS_USER, VPS_PASSWORD, CLAUDE_BIN, BASE_DIR,
-    ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
+    ANTHROPIC_API_KEY, ANTHROPIC_MODEL, OLEG_TG_CHANNEL,
 )
 import json as _json_mod
 from memory_graph import MemoryGraph
@@ -183,6 +183,19 @@ async def _safe_answer(message: Message, text: str, **kwargs):
         if "can't parse entities" in str(e):
             log.warning("Markdown не распарсился, шлю как обычный текст: %s", e)
             await message.answer(text, parse_mode=None, **{k: v for k, v in kwargs.items() if k != "parse_mode"})
+        else:
+            raise
+
+
+async def _safe_edit(message: Message, text: str, **kwargs):
+    """Как _safe_answer, но для edit_text — тот же риск невалидного
+    Markdown в ИИ-сгенерированном тексте карточек ContentZavod."""
+    try:
+        await message.edit_text(text, **kwargs)
+    except TelegramBadRequest as e:
+        if "can't parse entities" in str(e):
+            log.warning("Markdown не распарсился при edit_text, шлю как обычный текст: %s", e)
+            await message.edit_text(text, parse_mode=None, **{k: v for k, v in kwargs.items() if k != "parse_mode"})
         else:
             raise
 
@@ -742,6 +755,145 @@ async def cmd_leads(message: Message):
         await message.answer_document(FSInputFile(out_path), caption="leads.csv — потенциальные клиенты Светланы")
     else:
         await message.answer("Никого не осталось после фильтра — попробуй без фильтра городов или другие группы.")
+
+
+# ───── CONTENTZAVOD — публикация в Telegram (Фаза 4, только ТГ) ─────
+# ВК публикуется вручную (см. content_zavod/clients/oleg/platforms.md —
+# VK-токен заблокирован модерацией VK, не наш баг).
+
+_CZ_DIR = BASE_DIR / "content_zavod"
+
+
+def _cz_latest_drafts_path(client: str):
+    drafts_dir = _CZ_DIR / "clients" / client / "drafts"
+    candidates = sorted(drafts_dir.glob("drafts_final_*.json")) if drafts_dir.exists() else []
+    return candidates[-1] if candidates else None
+
+
+def _cz_publish_state_path(client: str):
+    return _CZ_DIR / "clients" / client / "drafts" / "publish_state.json"
+
+
+def _cz_load_publish_state(client: str, batch_filename: str) -> dict:
+    path = _cz_publish_state_path(client)
+    if not path.exists():
+        return {}
+    data = _json_mod.loads(path.read_text(encoding="utf-8"))
+    if data.get("file") != batch_filename:
+        return {}  # новая пачка недели — прошлые решения не применимы
+    return data.get("decisions", {})
+
+
+def _cz_save_publish_state(client: str, batch_filename: str, decisions: dict):
+    _cz_publish_state_path(client).write_text(
+        _json_mod.dumps({"file": batch_filename, "decisions": decisions}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _cz_draft_card_text(draft: dict, idx: int, total: int) -> str:
+    return (
+        f"*[{idx + 1}/{total}] {draft.get('topic', '')}*\n\n"
+        f"_Хук: {draft.get('chosen_hook', '')}_\n\n"
+        f"— — —\n{draft.get('tg_post', '')}\n— — —\n\n"
+        f"Пост ВК (публикуй вручную):\n{draft.get('vk_post', '')}"
+    )
+
+
+def _cz_draft_kb(idx: int):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Опубликовать в ТГ", callback_data=f"cz_pub:{idx}")
+    kb.button(text="⏭ Пропустить", callback_data=f"cz_skip:{idx}")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+async def _cz_send_next(chat_id: int, bot: Bot, client: str):
+    drafts_path = _cz_latest_drafts_path(client)
+    if drafts_path is None:
+        await bot.send_message(chat_id, f"Не найден drafts_final_*.json для клиента «{client}».")
+        return
+    drafts = _json_mod.loads(drafts_path.read_text(encoding="utf-8"))
+    decisions = _cz_load_publish_state(client, drafts_path.name)
+
+    pending = [i for i in range(len(drafts)) if str(i) not in decisions]
+    if not pending:
+        await bot.send_message(chat_id, "Все темы этой пачки уже обработаны (опубликованы или пропущены).")
+        return
+
+    idx = pending[0]
+    card_text = _cz_draft_card_text(drafts[idx], idx, len(drafts))
+    try:
+        await bot.send_message(chat_id, card_text, reply_markup=_cz_draft_kb(idx))
+    except TelegramBadRequest as e:
+        if "can't parse entities" in str(e):
+            await bot.send_message(chat_id, card_text, reply_markup=_cz_draft_kb(idx), parse_mode=None)
+        else:
+            raise
+
+
+@router.message(Command("cz_publish"))
+async def cmd_cz_publish(message: Message, bot: Bot):
+    if not _auth(message):
+        return
+    if not OLEG_TG_CHANNEL:
+        await message.answer("❌ OLEG_TG_CHANNEL не задан в .env.")
+        return
+    await _cz_send_next(message.chat.id, bot, "oleg")
+
+
+@router.callback_query(F.data.startswith("cz_pub:"))
+async def cb_cz_publish_one(callback: CallbackQuery, bot: Bot):
+    if not _auth(callback.message):
+        return
+    idx = int(callback.data.split(":", 1)[1])
+    client = "oleg"
+    drafts_path = _cz_latest_drafts_path(client)
+    if drafts_path is None:
+        await callback.answer("Пачка не найдена.", show_alert=True)
+        return
+    drafts = _json_mod.loads(drafts_path.read_text(encoding="utf-8"))
+    draft = drafts[idx]
+
+    try:
+        await bot.send_message(OLEG_TG_CHANNEL, draft.get("tg_post", ""), parse_mode="Markdown")
+    except TelegramBadRequest as e:
+        if "can't parse entities" in str(e):
+            await bot.send_message(OLEG_TG_CHANNEL, draft.get("tg_post", ""), parse_mode=None)
+        else:
+            await callback.answer(f"Ошибка публикации: {e}", show_alert=True)
+            return
+    except Exception as e:
+        await callback.answer(f"Ошибка публикации: {e}", show_alert=True)
+        return
+
+    decisions = _cz_load_publish_state(client, drafts_path.name)
+    decisions[str(idx)] = "published"
+    _cz_save_publish_state(client, drafts_path.name, decisions)
+
+    await _safe_edit(callback.message, callback.message.text + "\n\n✅ *Опубликовано в @textprodv*", reply_markup=None)
+    await callback.answer("Опубликовано")
+    await _cz_send_next(callback.message.chat.id, bot, client)
+
+
+@router.callback_query(F.data.startswith("cz_skip:"))
+async def cb_cz_skip_one(callback: CallbackQuery, bot: Bot):
+    if not _auth(callback.message):
+        return
+    idx = int(callback.data.split(":", 1)[1])
+    client = "oleg"
+    drafts_path = _cz_latest_drafts_path(client)
+    if drafts_path is None:
+        await callback.answer("Пачка не найдена.", show_alert=True)
+        return
+
+    decisions = _cz_load_publish_state(client, drafts_path.name)
+    decisions[str(idx)] = "skipped"
+    _cz_save_publish_state(client, drafts_path.name, decisions)
+
+    await _safe_edit(callback.message, callback.message.text + "\n\n⏭ *Пропущено*", reply_markup=None)
+    await callback.answer("Пропущено")
+    await _cz_send_next(callback.message.chat.id, bot, client)
 
 
 # ───── АГЕНТ ─────
