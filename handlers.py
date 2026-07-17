@@ -4,6 +4,7 @@ import asyncio
 import sys
 import aiohttp
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -119,7 +120,7 @@ STAGES = [
     ("1", "Лендинг", "✅", "palkina-therapy.ru запущен, Метрика, цели"),
     ("2", "Яндекс.Директ", "⏸", "CSV готов — ждёт бюджета"),
     ("3", "ВКонтакте", "🔄", "Группа misemia, контент-план 12 постов, svet_bot"),
-    ("4", "Парсинг аудитории ВК", "⏳", "Похожая аудитория — не начат"),
+    ("4", "Парсинг аудитории ВК", "🔄", "Парсер готов, по всей России (9 групп), валидация по активности"),
     ("5", "Telegram svet_bot", "⚠️", "Код готов — нужен токен @LanaS777Bot"),
     ("6", "Яндекс Метрика", "✅", "Счётчик 109801157, цель form_submit"),
     ("7", "Прогрев контент", "⏳", "Серия прогревающих постов — не начат"),
@@ -164,6 +165,26 @@ def _auth(message: Message) -> bool:
     if not ALLOWED_USER_IDS:
         return True
     return message.from_user.id in ALLOWED_USER_IDS
+
+
+async def _safe_answer(message: Message, text: str, **kwargs):
+    """message.answer() с фолбэком на обычный текст.
+
+    ИИ-сгенерированный текст иногда содержит незакрытую Markdown-разметку
+    (одинокая * или _) — Telegram тогда отвечает TelegramBadRequest
+    "can't parse entities", и если это не поймать, исключение убивает весь
+    процесс бота (aiogram не перехватывает ошибки хендлеров сам), из-за чего
+    бот "молчит" несколько секунд на рестарте. Вместо падения — шлём тем же
+    текстом без разметки.
+    """
+    try:
+        await message.answer(text, **kwargs)
+    except TelegramBadRequest as e:
+        if "can't parse entities" in str(e):
+            log.warning("Markdown не распарсился, шлю как обычный текст: %s", e)
+            await message.answer(text, parse_mode=None, **{k: v for k, v in kwargs.items() if k != "parse_mode"})
+        else:
+            raise
 
 
 def _coach_kb():
@@ -631,7 +652,7 @@ async def cmd_help(message: Message):
         "/projects — все проекты Олега (статус, git pull)\n"
         "/notify on|off — уведомления\n"
         "/coach — финансовый коуч\n"
-        "/leads группы;города — парсинг похожей аудитории ВК (Этап 4)\n"
+        "/leads [группы|города] — парсинг аудитории ВК по всей России, фильтр опционален (Этап 4)\n"
         "/help — эта справка"
     )
 
@@ -680,7 +701,7 @@ async def cmd_leads(message: Message):
                 pass
     ticker_task = asyncio.create_task(_ticker())
 
-    def _run_parser() -> tuple[int, int, int, str | None]:
+    def _run_parser() -> tuple[int, int, int, int, str | None]:
         all_leads = []
         for raw_group in groups:
             try:
@@ -691,12 +712,12 @@ async def cmd_leads(message: Message):
         filtered = _lead_parser.filter_leads(all_leads, cities, max_days_inactive=30)
         deduped = _lead_parser.dedup_leads(filtered)
         if not deduped:
-            return len(all_leads), 0, 0, None
+            return len(all_leads), 0, 0, 0, None
         _lead_parser.write_csv(deduped, _LEADS_OUT_PATH)
-        return len(all_leads), len(filtered), len(deduped), _LEADS_OUT_PATH
+        return len(all_leads), len(filtered), len(deduped), len(deduped), _LEADS_OUT_PATH
 
     try:
-        total, after_filter, deduped_count, out_path = await asyncio.get_event_loop().run_in_executor(
+        total, after_filter, deduped_count, valid_count, out_path = await asyncio.get_event_loop().run_in_executor(
             None, _run_parser
         )
     except Exception as e:
@@ -709,12 +730,16 @@ async def cmd_leads(message: Message):
         ticker_task.cancel()
 
     await wait.delete()
+    scope_text = "всей России" if not cities else f"городах: {', '.join(cities)}"
     await message.answer(
-        f"Готово: собрано {total}, после фильтра города/активности {after_filter}, "
-        f"после дедупликации {deduped_count}."
+        f"✅ *Готово по {scope_text}*\n\n"
+        f"Собрано: {total}\n"
+        f"После фильтра город/активность: {after_filter}\n"
+        f"После дедупликации: {deduped_count}\n"
+        f"Валидных (готово к контакту): {valid_count}"
     )
     if out_path:
-        await message.answer_document(FSInputFile(out_path), caption="leads.csv")
+        await message.answer_document(FSInputFile(out_path), caption="leads.csv — потенциальные клиенты Светланы")
     else:
         await message.answer("Никого не осталось после фильтра — попробуй без фильтра городов или другие группы.")
 
@@ -753,6 +778,15 @@ async def cb_agent_clear(callback: CallbackQuery):
     _save_history()
     await callback.message.answer("🗑 История разговора очищена.")
     await callback.answer()
+
+
+@router.message(Command("reset"))
+async def cmd_reset(message: Message):
+    if not _auth(message):
+        return
+    _history.pop(message.chat.id, None)
+    _save_history()
+    await message.answer("🗑 История разговора очищена.")
 
 
 @router.message(Command("agent"))
@@ -976,14 +1010,14 @@ async def _dispatch_coach(message: Message):
     _memory.save_from_session(message.chat.id, user_text, result)
     hist = _history.setdefault(message.chat.id, [])
     hist.append(("user", user_text))
-    hist.append(("assistant", result[:500]))
+    hist.append(("assistant", result[:2500]))
     if len(hist) > 24:
         _history[message.chat.id] = hist[-24:]
     _save_history()
 
     await wait.delete()
     for i in range(0, len(result), 4000):
-        await message.answer(result[i:i+4000], reply_markup=_coach_kb() if i + 4000 >= len(result) else None)
+        await _safe_answer(message, result[i:i+4000], reply_markup=_coach_kb() if i + 4000 >= len(result) else None)
 
 
 def _session_history_text(chat_id: int | None) -> str:
@@ -1056,7 +1090,7 @@ async def _run_claude_subprocess(full_prompt: str) -> str:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "cmd", "/c", "claude", "--print",
+            "cmd", "/c", "claude", "--print", "--permission-mode", "bypassPermissions",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1105,7 +1139,7 @@ def _run_claude_vps_sync(full_prompt: str) -> str:
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(VPS_HOST, username=VPS_USER, password=VPS_PASSWORD, timeout=10)
         stdin, stdout, _ = client.exec_command(
-            "cd /root/telegram-bot && claude --print 2>&1", timeout=120
+            "cd /root/telegram-bot && claude --print --permission-mode bypassPermissions 2>&1", timeout=120
         )
         stdin.write(full_prompt + "\n")
         stdin.channel.shutdown_write()
@@ -1268,7 +1302,7 @@ async def handle_agent_message(message: Message):
     # Сохраняем в историю сессии
     hist = _history.setdefault(message.chat.id, [])
     hist.append(("user", prompt))
-    hist.append(("assistant", result[:500]))
+    hist.append(("assistant", result[:2500]))
     if len(hist) > 24:
         _history[message.chat.id] = hist[-24:]
     _save_history()
@@ -1280,7 +1314,25 @@ async def handle_agent_message(message: Message):
 
     # Разбиваем длинные ответы на части (лимит Telegram 4096 символов)
     for i in range(0, len(result), 4000):
-        await message.answer(result[i:i+4000])
+        await _safe_answer(message, result[i:i+4000])
+
+
+@router.message()
+async def handle_unmatched(message: Message):
+    """Ловит всё, что не подошло под остальные фильтры (голосовые, стикеры,
+    фото, документы и т.п.) — раньше такие сообщения проглатывались молча,
+    и бот выглядел "зависшим"/"молчащим" без единой строчки ответа."""
+    if not _auth(message):
+        return
+    log.info("Необработанное сообщение chat_id=%s content_type=%s", message.chat.id, message.content_type)
+    if message.text and message.text.startswith("/"):
+        await message.answer(
+            f"Неизвестная команда {message.text.split()[0]}. /help — список команд."
+        )
+    else:
+        await message.answer(
+            f"Не умею обрабатывать сообщения такого типа ({message.content_type}). Пришли текстом."
+        )
 
 
 # ───── ВСПОМОГАТЕЛЬНЫЕ ─────
