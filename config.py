@@ -21,6 +21,14 @@ CLAUDE_BIN = os.getenv("CLAUDE_BIN", "claude")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
+# Расшифровка голосовых сообщений (см. media.py). Получить бесплатно:
+# https://console.deepgram.com/api-keys — $200 кредитов без карты.
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
+
+# Куда сохранять входящие вложения (голос/фото/документы/видео) перед
+# отправкой агенту на анализ.
+UPLOADS_DIR = BASE_DIR / ".uploads"
+
 _raw_ids = os.getenv("ALLOWED_USER_IDS", "")
 ALLOWED_USER_IDS: list[int] = [
     int(x.strip()) for x in _raw_ids.split(",") if x.strip().isdigit()

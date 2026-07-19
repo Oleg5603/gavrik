@@ -17,12 +17,13 @@ from config import (
     CONTENT_PLAN_PATH, DIRECT_CSV_PATH, LANDING_DIR, ALLOWED_USER_IDS,
     VPS_HOST, VPS_USER, VPS_PASSWORD, CLAUDE_BIN, BASE_DIR,
     ANTHROPIC_API_KEY, ANTHROPIC_MODEL, OLEG_TG_CHANNEL,
-    YANDEX_ART_FOLDER_ID, YANDEX_ART_API_KEY,
+    YANDEX_ART_FOLDER_ID, YANDEX_ART_API_KEY, UPLOADS_DIR,
 )
 import json as _json_mod
 from memory_graph import MemoryGraph
 import projects_registry as _projects
 import vk_lead_parser as _lead_parser
+import media as _media
 
 _memory = MemoryGraph(BASE_DIR / "knowledge_graph.jsonl")
 _SESSIONS_FILE = BASE_DIR / "sessions.json"
@@ -1341,26 +1342,66 @@ def _session_history_text(chat_id: int | None) -> str:
     return f"\n\n=== ИСТОРИЯ ТЕКУЩЕЙ СЕССИИ ===\n{lines}"
 
 
-async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = None) -> str:
+async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = None,
+                   image_path: Path | None = None) -> str:
     """
     Единая точка вызова AI.
     1. Если ANTHROPIC_API_KEY — прямой SDK (быстро, надёжно), история идёт как messages[].
+       Если задан image_path — картинка уходит вместе с текстом мультимодальным
+       сообщением (документы/видео через SDK не поддержаны, см. ниже).
     2. Иначе — subprocess claude через cmd /c + stdin (работает на Windows);
        здесь claude --print не хранит состояние между вызовами, поэтому история
-       сессии подставляется в текст промпта явно.
+       сессии подставляется в текст промпта явно. Т.к. subprocess запущен с
+       --permission-mode bypassPermissions, Claude Code сам может прочитать
+       файл по указанному пути своим инструментом Read (работает для фото,
+       PDF, видео, аудио) — поэтому здесь image_path просто упоминается в
+       тексте промпта, а не кодируется в base64.
     """
     if ANTHROPIC_API_KEY:
-        return await _run_anthropic_sdk(system_prompt, user_message, chat_id)
+        return await _run_anthropic_sdk(system_prompt, user_message, chat_id, image_path)
     full_prompt = (
         system_prompt
         + _session_history_text(chat_id)
         + "\n\n=== НОВОЕ СООБЩЕНИЕ ===\n"
         + user_message
     )
+    if image_path is not None:
+        full_prompt += f"\n\n(Прикреплённый файл — прочитай его инструментом Read: {image_path})"
     return await _run_claude_subprocess(full_prompt)
 
 
-async def _run_anthropic_sdk(system_prompt: str, user_message: str, chat_id: int | None) -> str:
+def _build_user_content(user_message: str, image_path: Path | None):
+    """Собирает content для Anthropic SDK — либо просто строка, либо список
+    блоков (картинка + текст), если приложено изображение."""
+    if image_path is None:
+        return user_message
+
+    import base64
+    ext = image_path.suffix.lower().lstrip(".")
+    media_type = {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "png": "image/png", "gif": "image/gif", "webp": "image/webp",
+    }.get(ext)
+    if media_type is None:
+        # Не изображение (PDF/видео/аудио) — SDK-путь картинки не поддерживает,
+        # сообщаем модели путь текстом, честно предупреждая что содержимое
+        # не приложено (лучше явное ограничение, чем молчаливая заглушка).
+        return (
+            f"{user_message}\n\n"
+            f"(Файл {image_path.name} приложен пользователем, но этот тип "
+            f"файла нельзя передать напрямую через Anthropic API — только "
+            f"через subprocess-режим Claude Code. Скажи об этом честно.)"
+        )
+
+    data = base64.standard_b64encode(image_path.read_bytes()).decode("utf-8")
+    return [
+        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
+        {"type": "text", "text": user_message},
+    ]
+
+
+async def _run_anthropic_sdk(system_prompt: str, user_message: str, chat_id: int | None,
+                              image_path: Path | None = None) -> str:
     """Прямой вызов Anthropic API через SDK."""
     try:
         import anthropic
@@ -1370,7 +1411,7 @@ async def _run_anthropic_sdk(system_prompt: str, user_message: str, chat_id: int
         if chat_id is not None:
             for role, text in _history.get(chat_id, [])[-12:]:
                 messages.append({"role": role if role in ("user", "assistant") else "user", "content": text})
-        messages.append({"role": "user", "content": user_message})
+        messages.append({"role": "user", "content": _build_user_content(user_message, image_path)})
 
         response = await asyncio.wait_for(
             client.messages.create(
@@ -1571,19 +1612,13 @@ async def _run_claude_vps(chat_id: int, prompt: str) -> str:
     )
 
 
-@router.message(F.text & ~F.text.startswith("/"))
-async def handle_agent_message(message: Message):
-    """Перехватывает свободный текст — если агент или коуч включён, отправляет запрос."""
-    if not _auth(message):
-        return
-    if message.chat.id in _coach_mode:
-        await _dispatch_coach(message)
-        return
-    if message.chat.id not in _agent_mode:
-        return  # не в режиме агента — игнорируем
-
+async def _run_agent_and_reply(message: Message, bot: Bot, prompt: str,
+                                image_path: Path | None = None) -> None:
+    """Общий путь "спросить агента и ответить" — переиспользуется текстовым
+    хендлером и хендлерами вложений (голос/фото/документы/видео), чтобы вся
+    логика (тикер "Думаю...", история, теги файлов от агента) не дублировалась
+    в каждом отдельно."""
     wait = await message.answer("🤖 Думаю... (0с)")
-    prompt = message.text.strip()
 
     # Таймер: обновляет сообщение каждые 10 сек пока агент думает
     done_event = asyncio.Event()
@@ -1601,7 +1636,7 @@ async def handle_agent_message(message: Message):
     ticker_task = asyncio.create_task(_ticker())
 
     try:
-        result = await _ask_ai(AGENT_SYSTEM, prompt, message.chat.id)
+        result = await _ask_ai(AGENT_SYSTEM, prompt, message.chat.id, image_path=image_path)
     finally:
         done_event.set()
         ticker_task.cancel()
@@ -1619,16 +1654,158 @@ async def handle_agent_message(message: Message):
 
     await wait.delete()
 
+    # Агент мог сослаться на файлы тегами [ФАЙЛ: путь] и т.п. — вырезаем их
+    # из текста и прикладываем реальными файлами (см. media.py).
+    text_only, file_tags = _media.extract_file_tags(result)
+    found_files, missing_paths = _media.resolve_existing_files(file_tags)
+
     # Разбиваем длинные ответы на части (лимит Telegram 4096 символов)
-    for i in range(0, len(result), 4000):
-        await _safe_answer(message, result[i:i+4000])
+    if text_only:
+        for i in range(0, len(text_only), 4000):
+            await _safe_answer(message, text_only[i:i + 4000])
+
+    for method, path in found_files:
+        try:
+            input_file = FSInputFile(path)
+            sender = getattr(message, f"answer_{method}")
+            await sender(input_file)
+        except Exception as e:
+            log.warning("Не удалось отправить файл %s (%s): %s", path, method, e)
+            await message.answer(f"⚠ Агент создал файл {path.name}, но отправить его не удалось: {e}")
+
+    if missing_paths:
+        paths_list = "\n".join(f"— {p}" for p in missing_paths)
+        await message.answer(
+            f"⚠ Агент сослался на файл(ы), которых не нашлось на диске:\n{paths_list}"
+        )
+
+
+@router.message(F.text & ~F.text.startswith("/"))
+async def handle_agent_message(message: Message, bot: Bot):
+    """Перехватывает свободный текст — если агент или коуч включён, отправляет запрос."""
+    if not _auth(message):
+        return
+    if message.chat.id in _coach_mode:
+        await _dispatch_coach(message)
+        return
+    if message.chat.id not in _agent_mode:
+        return  # не в режиме агента — игнорируем
+
+    await _run_agent_and_reply(message, bot, message.text.strip())
+
+
+def _agent_mode_hint(kind: str) -> str:
+    return (
+        f"{kind} получен(о), но режим агента выключен — я не обрабатываю вложения "
+        f"вне режима агента. Напиши /agent, чтобы включить, и пришли ещё раз."
+    )
+
+
+@router.message(F.voice | F.audio)
+async def handle_voice_message(message: Message, bot: Bot):
+    """Голосовые/аудио → Deepgram → расшифровка идёт в агента как обычный
+    текстовый запрос. Раньше такие сообщения попадали в handle_unmatched
+    с ответом "не умею обрабатывать"."""
+    if not _auth(message):
+        return
+    if message.chat.id not in _agent_mode:
+        await message.answer(_agent_mode_hint("🎤 Голосовое"))
+        return
+
+    voice = message.voice or message.audio
+    status = await message.answer("🎤 Слушаю голосовое...")
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    is_voice = message.voice is not None
+    ext = "ogg" if is_voice else (Path(getattr(voice, "file_name", None) or "audio.mp3").suffix.lstrip(".") or "mp3")
+    dest = UPLOADS_DIR / f"voice_{message.message_id}.{ext}"
+
+    try:
+        await bot.download(voice, destination=dest)
+        mime = "audio/ogg" if is_voice else "audio/mpeg"
+        transcript = await _media.transcribe_voice(dest.read_bytes(), mime_type=mime)
+    except _media.TranscriptionNotConfigured as e:
+        await status.edit_text(str(e))
+        return
+    except _media.TranscriptionError as e:
+        await status.edit_text(f"❌ Не удалось расшифровать голосовое: {e}")
+        return
+    except Exception as e:
+        log.exception("Ошибка обработки голосового")
+        await status.edit_text(f"❌ Ошибка при обработке голосового: {e}")
+        return
+
+    preview = transcript[:100] + ("…" if len(transcript) > 100 else "")
+    await status.edit_text(f"Распознано: «{preview}»")
+
+    await _run_agent_and_reply(message, bot, transcript)
+
+
+@router.message(F.photo)
+async def handle_photo_message(message: Message, bot: Bot):
+    """Фото → скачивается и уходит агенту на анализ (мультимодально через
+    Anthropic SDK, либо через инструмент Read у Claude Code в subprocess-режиме)."""
+    if not _auth(message):
+        return
+    if message.chat.id not in _agent_mode:
+        await message.answer(_agent_mode_hint("📷 Фото"))
+        return
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    largest = message.photo[-1]
+    dest = UPLOADS_DIR / f"photo_{message.message_id}.jpg"
+    await bot.download(largest, destination=dest)
+
+    prompt = message.caption.strip() if message.caption else "Что на этом фото? Опиши подробно."
+    await _run_agent_and_reply(message, bot, prompt, image_path=dest)
+
+
+@router.message(F.document)
+async def handle_document_message(message: Message, bot: Bot):
+    """PDF/Word/txt/любой файл → скачивается, путь передаётся агенту (Read
+    инструмент Claude Code читает PDF/офисные форматы; через Anthropic SDK
+    честно предупреждаем, что документ не приложен напрямую — см. media.py)."""
+    if not _auth(message):
+        return
+    if message.chat.id not in _agent_mode:
+        await message.answer(_agent_mode_hint("📄 Документ"))
+        return
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    doc = message.document
+    suffix = Path(doc.file_name or "file").suffix or ""
+    dest = UPLOADS_DIR / f"doc_{message.message_id}{suffix}"
+    await bot.download(doc, destination=dest)
+
+    prompt = message.caption.strip() if message.caption else f"Изучи файл {doc.file_name} и перескажи суть."
+    await _run_agent_and_reply(message, bot, prompt, image_path=dest)
+
+
+@router.message(F.video | F.video_note)
+async def handle_video_message(message: Message, bot: Bot):
+    """Видео/видео-кружок → скачивается, дальше как документ (Read-инструмент
+    Claude Code умеет разбирать видео; через SDK — честное предупреждение)."""
+    if not _auth(message):
+        return
+    if message.chat.id not in _agent_mode:
+        await message.answer(_agent_mode_hint("🎬 Видео"))
+        return
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    video = message.video or message.video_note
+    dest = UPLOADS_DIR / f"video_{message.message_id}.mp4"
+    await bot.download(video, destination=dest)
+
+    prompt = message.caption.strip() if message.caption else "Посмотри это видео и опиши, что происходит."
+    await _run_agent_and_reply(message, bot, prompt, image_path=dest)
 
 
 @router.message()
 async def handle_unmatched(message: Message):
-    """Ловит всё, что не подошло под остальные фильтры (голосовые, стикеры,
-    фото, документы и т.п.) — раньше такие сообщения проглатывались молча,
-    и бот выглядел "зависшим"/"молчащим" без единой строчки ответа."""
+    """Ловит всё, что не подошло под остальные фильтры (стикеры, контакты,
+    геолокация и т.п. — голос/фото/документы/видео теперь обрабатываются
+    отдельными хендлерами выше). Раньше такие сообщения проглатывались
+    молча, и бот выглядел "зависшим"/"молчащим" без единой строчки ответа."""
     if not _auth(message):
         return
     log.info("Необработанное сообщение chat_id=%s content_type=%s", message.chat.id, message.content_type)
