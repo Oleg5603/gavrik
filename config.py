@@ -18,6 +18,8 @@ VPS_HOST = os.getenv("VPS_HOST", "")
 VPS_USER = os.getenv("VPS_USER", "agent")
 VPS_PASSWORD = os.getenv("VPS_PASSWORD", "")
 CLAUDE_BIN = os.getenv("CLAUDE_BIN", "claude")
+AGENT_PROVIDER = os.getenv("AGENT_PROVIDER", "codex").strip().lower()
+CODEX_BIN = os.getenv("CODEX_BIN", "codex")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 

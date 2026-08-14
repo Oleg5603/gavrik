@@ -15,7 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import (
     VK_TOKEN, VK_GROUP_ID, SITE_URL,
     CONTENT_PLAN_PATH, DIRECT_CSV_PATH, LANDING_DIR, ALLOWED_USER_IDS,
-    VPS_HOST, VPS_USER, VPS_PASSWORD, CLAUDE_BIN, BASE_DIR,
+    VPS_HOST, VPS_USER, VPS_PASSWORD, CLAUDE_BIN, AGENT_PROVIDER, CODEX_BIN, BASE_DIR,
     ANTHROPIC_API_KEY, ANTHROPIC_MODEL, OLEG_TG_CHANNEL,
     YANDEX_ART_FOLDER_ID, YANDEX_ART_API_KEY, UPLOADS_DIR,
 )
@@ -1357,7 +1357,7 @@ async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = N
        PDF, видео, аудио) — поэтому здесь image_path просто упоминается в
        тексте промпта, а не кодируется в base64.
     """
-    if ANTHROPIC_API_KEY:
+    if AGENT_PROVIDER == "anthropic" and ANTHROPIC_API_KEY:
         return await _run_anthropic_sdk(system_prompt, user_message, chat_id, image_path)
     full_prompt = (
         system_prompt
@@ -1367,7 +1367,43 @@ async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = N
     )
     if image_path is not None:
         full_prompt += f"\n\n(Прикреплённый файл — прочитай его инструментом Read: {image_path})"
+    if AGENT_PROVIDER == "codex":
+        return await _run_codex_subprocess(full_prompt)
     return await _run_claude_subprocess(full_prompt)
+
+
+async def _run_codex_subprocess(full_prompt: str) -> str:
+    """Run one non-interactive Codex turn, passing the prompt over stdin."""
+    import os
+    env = {**os.environ}
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        env.pop(key, None)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            CODEX_BIN, "exec", "--skip-git-repo-check", "-C", str(BASE_DIR), "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=full_prompt.encode("utf-8", errors="replace")),
+            timeout=600,
+        )
+        result = stdout.decode("utf-8", errors="replace").strip()
+        error = stderr.decode("utf-8", errors="replace").strip()
+        if proc.returncode and not result:
+            return f"Ошибка Codex (код {proc.returncode}): {error or 'нет описания'}"
+        return result or error or "Codex не вернул ответ."
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return "Таймаут 10 минут — Codex не ответил. Попробуйте разбить запрос на части."
+    except Exception as exc:
+        return f"Ошибка запуска Codex: {exc}"
 
 
 def _build_user_content(user_message: str, image_path: Path | None):
