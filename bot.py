@@ -1,8 +1,12 @@
 import asyncio
 import logging
-import msvcrt
 import sys
 from pathlib import Path
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -39,7 +43,10 @@ def _acquire_single_instance_lock():
         lock_file.write("x")
         lock_file.flush()
         lock_file.seek(0)
-        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        if sys.platform == "win32":
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         log.error("Уже запущен другой процесс bot.py (файл-лок %s занят). Выхожу.", _LOCK_PATH)
         sys.exit(1)
