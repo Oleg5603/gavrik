@@ -2,10 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from multi_agent import IterationLimitError, QUALITY_GATES, ROLES, WorkflowState
+from multi_agent import GROUP_NAME, IterationLimitError, QUALITY_GATES, ROLES, WorkflowState
 
 
 def test_all_requested_roles_have_explicit_contracts():
+    assert GROUP_NAME == "ПРОЕКТ"
     assert len(ROLES) == 13
     assert all(role.inputs and role.outputs and role.exit_condition for role in ROLES.values())
 

@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 import json
 
+GROUP_NAME = "ПРОЕКТ"
+
 
 class Severity(str, Enum):
     CRITICAL = "critical"
@@ -111,7 +113,7 @@ class WorkflowState:
 def orchestrator_context() -> str:
     names = ", ".join(role.title for role in ROLES.values())
     return (
-        "Многоагентная команда разработки: " + names + ". "
+        f"Группа агентов «{GROUP_NAME}»: " + names + ". "
         "Маршрут: " + " → ".join(WORKFLOW) + ". "
         "Максимум 3 итерации в каждом цикле; затем обязательная эскалация человеку. "
         "Архитектура и релиз требуют human approval; critical/high замечания блокируют следующий gate."
