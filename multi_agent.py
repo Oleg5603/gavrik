@@ -7,6 +7,7 @@ from enum import Enum
 from pathlib import Path
 import json
 
+SYSTEM_NAME = "Оркестратор ПРОЕКТИРОВАНИЯ"
 GROUP_NAME = "ПРОЕКТ"
 
 
@@ -61,6 +62,15 @@ ROLES = {
 }
 
 
+SUBORDINATE_AGENTS = {
+    "ledovskikh": {
+        "title": "Ледовских",
+        "parent": "orchestrator",
+        "entrypoint": "python -m ledovskikh_agent.cli",
+        "policy": "Proposals only; risky/external changes require QA, Security and human approval.",
+    }
+}
+
 WORKFLOW = (
     "planner", "architect", "challenger", "developer", "reviewer", "qa",
     "security", "controller", "ux_tester", "protector",
@@ -113,7 +123,7 @@ class WorkflowState:
 def orchestrator_context() -> str:
     names = ", ".join(role.title for role in ROLES.values())
     return (
-        f"Группа агентов «{GROUP_NAME}»: " + names + ". "
+        f"Система «{SYSTEM_NAME}», группа агентов «{GROUP_NAME}»: " + names + ". "
         "Маршрут: " + " → ".join(WORKFLOW) + ". "
         "Максимум 3 итерации в каждом цикле; затем обязательная эскалация человеку. "
         "Архитектура и релиз требуют human approval; critical/high замечания блокируют следующий gate."

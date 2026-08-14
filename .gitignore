@@ -5,3 +5,5 @@ __pycache__/
 *.db
 sessions.json
 knowledge_graph.jsonl
+.private/
+.ledovskikh/

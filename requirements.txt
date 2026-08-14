@@ -3,3 +3,4 @@ aiohttp==3.13.5
 python-dotenv==1.2.2
 requests==2.32.3
 anthropic==0.111.0
+Telethon==1.40.0
