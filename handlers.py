@@ -24,6 +24,7 @@ from memory_graph import MemoryGraph
 import projects_registry as _projects
 import vk_lead_parser as _lead_parser
 import media as _media
+from multi_agent import orchestrator_context
 
 _memory = MemoryGraph(BASE_DIR / "knowledge_graph.jsonl")
 _SESSIONS_FILE = BASE_DIR / "sessions.json"
@@ -73,6 +74,7 @@ AGENT_SYSTEM = (
     "Отвечаешь чётко, по делу, на русском языке. "
     "Помнишь контекст разговора и используешь его в ответах.\n\n"
     + _projects.context_summary() + "\n\n"
+    + orchestrator_context() + "\n\n"
     "Если пользователь спрашивает про статус/прогресс любого из этих проектов "
     "или просит что-то по ним сделать — используй эти сведения и команду /projects.\n\n"
     "Jarvis Architect (jarvis-architect) — твой субагент-мастерская: если пользователь просит "
