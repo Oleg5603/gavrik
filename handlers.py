@@ -369,7 +369,7 @@ async def _send_plan(message: Message):
         lines.append(f"*{num}* — {topic}: {title}")
     lines.append("\n📄 Полный план: vk\\_content/content\\_plan.md")
     lines.append("Создать пост: /newpost")
-    await message.answer("\n".join(lines))
+    await _safe_answer(message, "\n".join(lines))
 
 
 # ───── ЗАДАЧИ ─────
@@ -1102,6 +1102,11 @@ async def cmd_reset(message: Message):
 @router.message(Command("agent"))
 async def cmd_agent(message: Message):
     if not _auth(message):
+        await message.answer(
+            "⛔ Этот Telegram-пользователь не добавлен в ALLOWED_USER_IDS.\n"
+            f"Ваш Telegram ID: {message.from_user.id}\n"
+            "Передайте этот ID владельцу сервера для добавления."
+        )
         return
     _agent_mode.add(message.chat.id)
     _save_history()
@@ -1722,6 +1727,9 @@ async def _run_agent_and_reply(message: Message, bot: Bot, prompt: str,
 async def handle_agent_message(message: Message, bot: Bot):
     """Перехватывает свободный текст — если агент или коуч включён, отправляет запрос."""
     if not _auth(message):
+        await message.answer(
+            "⛔ Нет доступа к Гаврику. Сначала отправьте /agent — бот покажет ваш Telegram ID."
+        )
         return
     if message.chat.id in _coach_mode:
         await _dispatch_coach(message)

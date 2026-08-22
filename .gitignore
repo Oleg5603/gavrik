@@ -7,3 +7,11 @@ sessions.json
 knowledge_graph.jsonl
 .private/
 .ledovskikh/
+.pc_agent_token
+pc_agent.env
+.pc_bridge_venv/
+.bot.lock
+.vscode/
+ssh_out.txt
+leads*.csv
+content_zavod/clients/oleg/drafts/images/
