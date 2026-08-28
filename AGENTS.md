@@ -15,6 +15,19 @@
 | **Публикатор** | Выкладывает готовый пост через `svet_bot` или вручную на vk.com/misemia | внешний Telegram-бот, вне кода Гаврика |
 | **Коуч** | Отдельная персона — коуч по финансовой эффективности, не даёт готовых решений, задаёт вопросы | `COACH_SYSTEM` в `handlers.py`, `/coach` |
 | **Субагент-мастерская (Jarvis Architect)** | Разворачивает новых агентов на VPS, настраивает напоминания, разработку с нуля — вызывается, не выполняется самим Гавриком | см. `projects_registry.py` запись `jarvis-architect` |
+| **Оркестратор создания сайтов** | Подчинённый Гаврику координатор полного цикла сайта: strategy → experience → engineering → independent quality → security/release | `site_orchestrator/`, ключ `site-orchestrator` в `multi_agent.py` |
+
+### Команды оркестратора сайтов
+
+Гаврик остаётся единой точкой постановки задачи, статуса, разрешений и
+эскалаций. Подчинённый принимает машинные команды `site.create`, `site.audit`,
+`site.resume`, `site.status`, `site.preview`, `site.release` через
+`python -m site_orchestrator.cli --project-root <path>` и JSON work order.
+
+Публикация, домены, платные сервисы и внешние сообщения запрещены без явно
+переданного владельцем разрешения. Для `site.release` одновременно требуются
+`human_approval=true` и `approval_scope` с `publish`; иначе возвращается
+`ready_for_approval`. Открытые critical/high замечания блокируют следующий gate.
 
 ## Порядок выполнения (Workflow)
 

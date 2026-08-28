@@ -69,6 +69,17 @@ SUBORDINATE_AGENTS = {
         "entrypoint": "python -m ledovskikh_agent.cli",
         "policy": "Proposals only; risky/external changes require QA, Security and human approval.",
     }
+    ,
+    "site-orchestrator": {
+        "title": "Оркестратор создания сайтов",
+        "parent": "orchestrator",
+        "entrypoint": "python -m site_orchestrator.cli",
+        "policy": (
+            "Subordinate to Gavrik. Work inside the approved project scope; "
+            "publishing, domains, paid services and external messages require "
+            "explicit human approval routed through Gavrik."
+        ),
+    },
 }
 
 WORKFLOW = (
@@ -122,9 +133,14 @@ class WorkflowState:
 
 def orchestrator_context() -> str:
     names = ", ".join(role.title for role in ROLES.values())
+    subordinate_names = ", ".join(
+        f"{key}={item['title']} (parent={item['parent']})"
+        for key, item in SUBORDINATE_AGENTS.items()
+    )
     return (
         f"Система «{SYSTEM_NAME}», группа агентов «{GROUP_NAME}»: " + names + ". "
         "Маршрут: " + " → ".join(WORKFLOW) + ". "
         "Максимум 3 итерации в каждом цикле; затем обязательная эскалация человеку. "
-        "Архитектура и релиз требуют human approval; critical/high замечания блокируют следующий gate."
+        "Архитектура и релиз требуют human approval; critical/high замечания блокируют следующий gate. "
+        f"Подчинённые оркестраторы: {subordinate_names}."
     )

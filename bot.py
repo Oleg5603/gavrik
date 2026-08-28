@@ -12,6 +12,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 
 from config import TELEGRAM_TOKEN, TELEGRAM_PROXY_URL
 import handlers
@@ -78,6 +79,23 @@ async def main():
     )
     dp = Dispatcher()
     dp.include_router(handlers.router)
+
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="status", description="Краткий статус всех проектов"),
+        BotCommand(command="stages", description="Этапы 1–8 с иконками"),
+        BotCommand(command="site", description="Проверить сайт"),
+        BotCommand(command="vk", description="Статистика ВКонтакте"),
+        BotCommand(command="plan", description="Контент-план: 12 постов"),
+        BotCommand(command="newpost", description="Создать пост из плана"),
+        BotCommand(command="tasks", description="Открытые задачи"),
+        BotCommand(command="manage", description="Панель управления"),
+        BotCommand(command="projects", description="Все проекты: статус и git pull"),
+        BotCommand(command="notify", description="Уведомления: /notify on|off"),
+        BotCommand(command="coach", description="Финансовый коуч"),
+        BotCommand(command="leads", description="Аудитория ВК: группы|города"),
+        BotCommand(command="help", description="Справка по командам"),
+    ])
 
     @dp.error()
     async def on_error(event):
