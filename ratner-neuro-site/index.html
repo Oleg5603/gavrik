@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Информационный помощник для родителей: когда и к какому специалисту обратиться." />
+    <title>НейроНавигатор — информационный помощник</title>
+    <link rel="stylesheet" href="src/styles.css" />
+  </head>
+  <body>
+    <div id="root">
+      <header class="header"><a class="brand" href="#top"><span class="brand-mark">Н</span><span>НейроНавигатор<small>информационный помощник</small></span></a><nav><a href="#about">О проекте</a><a href="#warning">Тревожные признаки</a><a class="nav-action" href="#check">Пройти проверку</a></nav></header>
+      <main id="top">
+        <section class="hero"><div class="hero-copy"><span class="eyebrow">Спокойно разобраться в ситуации</span><h1>Понятный маршрут, когда вы беспокоитесь о развитии ребёнка</h1><p>Ответьте на несколько простых вопросов и узнайте, насколько срочно стоит обратиться за профессиональной помощью.</p><div class="hero-actions"><a class="primary" href="#check">Начать проверку</a><a class="text-link" href="#warning">Сначала увидеть тревожные признаки →</a></div><p class="safe-label">Без регистрации · Без сохранения данных · 2 минуты</p></div><div class="hero-visual" aria-hidden="true"><div class="orbit one"></div><div class="orbit two"></div><div class="figure"><span class="head"></span><span class="body"></span><i class="pulse p1"></i><i class="pulse p2"></i><i class="pulse p3"></i></div></div></section>
+        <section class="notice"><strong>Важно:</strong> сервис не ставит диагноз, не определяет зону поражения и не назначает обследования. Он помогает подготовиться к разговору с врачом.</section>
+        <section id="warning" class="section warning-section"><div><span class="eyebrow">Когда нельзя ждать</span><h2>Сразу звоните 112 или 103</h2></div><div class="warning-grid"><article><b>01</b><h3>Судороги или потеря сознания</h3><p>Особенно если это произошло впервые или состояние не восстанавливается.</p></article><article><b>02</b><h3>Внезапная слабость</h3><p>Ребёнок неожиданно перестал двигать рукой, ногой или появилась резкая асимметрия лица.</p></article><article><b>03</b><h3>Нарушение дыхания</h3><p>Затруднённое дыхание, посинение губ или выраженная вялость требуют экстренной помощи.</p></article></div></section>
+        <section id="check" class="section check-section"><div class="section-heading"><span class="eyebrow">Демо-проверка</span><h2>Определим следующий безопасный шаг</h2><p>Отвечайте только на то, что вы наблюдаете. Не выполняйте домашние неврологические тесты.</p></div><div id="questionnaire"></div></section>
+        <section id="about" class="section about-section"><div><span class="eyebrow">О проекте</span><h2>Информация вместо самодиагностики</h2></div><div><p>Первая версия создана для проверки структуры и пользовательского сценария. Она не использует методические матрицы, не обрабатывает медицинские данные и не заменяет очную консультацию.</p><p class="draft">Статус правил: draft — требуется утверждение врачом</p></div></section>
+      </main>
+      <footer><span>НейроНавигатор · безопасный прототип</span><span>При угрозе жизни звоните 112</span></footer>
+    </div>
+    <script type="module" src="src/static.js"></script>
+  </body>
+</html>
