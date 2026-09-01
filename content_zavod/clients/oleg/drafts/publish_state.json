@@ -1,7 +1,9 @@
 {
-  "file": "drafts_final_20260717_113855.json",
+  "file": "drafts_final_20260718_160241.json",
   "decisions": {
-    "0": "published",
-    "1": "published"
+    "2": {
+      "status": "published",
+      "at": "2026-07-20T10:00:00"
+    }
   }
 }
