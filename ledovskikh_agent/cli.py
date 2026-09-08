@@ -8,6 +8,7 @@ from .telegram_source import collect_messages
 def main() -> int:
     parser = argparse.ArgumentParser(description="Gavrik subordinate agent Ledovskikh")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--content-research", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     load_dotenv(root / ".env")
@@ -22,8 +23,10 @@ def main() -> int:
     folder = os.getenv("LEDOVSKIKH_TG_FOLDER", "Нейрозавод")
     allowlist = {int(x) for x in os.getenv("LEDOVSKIKH_TG_CHAT_IDS", "").split(",") if x.strip().lstrip("-").isdigit()}
     messages = asyncio.run(collect_messages(api_id, api_hash, session, folder, allowlist))
-    candidates = StateStore(root / ".ledovskikh" / "state.json").process(messages)
-    print(write_report(candidates, root / ".ledovskikh" / "reports"))
+    state_name = "content_research_state.json" if args.content_research else "state.json"
+    report_dir = "content-research-reports" if args.content_research else "reports"
+    candidates = StateStore(root / ".ledovskikh" / state_name).process(messages)
+    print(write_report(candidates, root / ".ledovskikh" / report_dir))
     return 0
 
 if __name__ == "__main__":

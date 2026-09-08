@@ -19,3 +19,11 @@ def test_checkpoint_and_dedup(tmp_path):
     assert len(store.process([msg])) == 1
     assert store.process([msg]) == []
     assert store.checkpoint(1) == 5
+
+
+def test_content_signal_without_link_is_saved(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    msg = Message(1, 6, "2026-01-02", "Лид-магнит поднял охват и подписчиков", "Нейрозавод")
+    items = store.process([msg])
+    assert len(items) == 1
+    assert items[0].url == ""

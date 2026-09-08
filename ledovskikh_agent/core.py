@@ -17,6 +17,9 @@ KEYWORDS = (
     "вайбкодинг", "вайб-кодинг", "вайб кодинг",
     "codex", "кодекс", "agent", "агент", "multi-agent", "мультиагент",
     "проект", "ledovsk", "ледовск",
+    "подписчик", "охват", "вовлеч", "вираль", "вирусн",
+    "контент", "пост", "рилс", "reels", "лид-магнит",
+    "воронка", "продаж", "конверс", "аудитори", "реклам",
 )
 
 
@@ -90,14 +93,14 @@ class StateStore:
         for msg in sorted(messages, key=lambda item: (item.chat_id, item.message_id)):
             if msg.message_id <= self.checkpoint(msg.chat_id):
                 continue
-            for url in extract_urls(msg.text):
+            for url in extract_urls(msg.text) or [""]:
                 digest = sha256(f"{msg.chat_id}:{msg.message_id}:{url}".encode()).hexdigest()[:20]
                 if digest in seen:
                     continue
                 tags = relevance(msg.text, url)
                 if not tags:
                     continue
-                page_text = link_reader(url) if link_reader and is_public_http_url(url) else ""
+                page_text = link_reader(url) if url and link_reader and is_public_http_url(url) else ""
                 combined_tags = list(dict.fromkeys(tags + relevance(page_text, url)))
                 candidate = Candidate(
                     candidate_id=digest,

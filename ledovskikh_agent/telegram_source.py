@@ -15,12 +15,21 @@ async def collect_messages(api_id, api_hash, session, folder, allowlist):
     if not selected:
         filters = await client(functions.messages.GetDialogFiltersRequest())
         for item in filters.filters:
-            if str(getattr(item, "title", "")) == folder:
+            raw_title = getattr(item, "title", "")
+            title = str(getattr(raw_title, "text", raw_title)).strip()
+            if title == folder:
                 for peer in item.include_peers:
                     selected.add(int(await client.get_peer_id(peer)))
     result = []
+    dialogs = await client.get_dialogs(limit=500)
+    entities = {
+        int(await client.get_peer_id(dialog.entity)): dialog.entity
+        for dialog in dialogs
+    }
     for chat_id in selected:
-        entity = await client.get_entity(chat_id)
+        entity = entities.get(chat_id)
+        if entity is None:
+            continue
         async for msg in client.iter_messages(entity, limit=100, reverse=True):
             result.append(Message(chat_id, msg.id, msg.date.isoformat(), msg.raw_text or "", getattr(entity, "title", str(chat_id))))
     await client.disconnect()
