@@ -1,0 +1,61 @@
+name: Gavrik tests and build
+
+on:
+  pull_request:
+  push:
+    branches: [master, 'maintenance/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gavrik-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gavrik-tests:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test maintenance modules
+        run: python -m unittest discover -s deploy/project_sync/tests -v
+      - name: Build and verify source package
+        shell: python
+        run: |
+          import hashlib, json
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          root = Path("deploy/project_sync").resolve()
+          files = sorted(p for p in root.rglob("*") if p.is_file() and
+                         (p.suffix == ".py" or p.name in ("README.md", "workflow-template.yml")))
+          assert files, "Empty release package"
+          assert all(p.resolve().is_relative_to(root) for p in files), "External package path"
+          output = Path("artifacts")
+          output.mkdir(exist_ok=True)
+          package = output / "gavrik-maintenance.zip"
+          hashes = {}
+          with ZipFile(package, "w", ZIP_DEFLATED) as archive:
+              for path in files:
+                  name = path.relative_to(root).as_posix()
+                  data = path.read_bytes()
+                  hashes[name] = hashlib.sha256(data).hexdigest()
+                  archive.writestr(name, data)
+              archive.writestr("SHA256.json", json.dumps(hashes, indent=2))
+          with ZipFile(package) as archive:
+              assert archive.testzip() is None
+              for name, expected in hashes.items():
+                  assert hashlib.sha256(archive.read(name)).hexdigest() == expected
+          print("Verified package:", len(hashes), "files")
+      - name: Upload verified build
+        uses: actions/upload-artifact@v4
+        with:
+          name: gavrik-maintenance-${{ github.sha }}
+          path: artifacts/gavrik-maintenance.zip
+          if-no-files-found: error
+          retention-days: 14
