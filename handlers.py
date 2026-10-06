@@ -24,7 +24,13 @@ from memory_graph import MemoryGraph
 import projects_registry as _projects
 import vk_lead_parser as _lead_parser
 import media as _media
-from multi_agent import orchestrator_context
+from multi_agent import (
+    orchestrator_context,
+    needs_controller_review,
+    controller_review_prompt,
+    build_controller_review_request,
+    format_controller_report,
+)
 
 _memory = MemoryGraph(BASE_DIR / "knowledge_graph.jsonl")
 _SESSIONS_FILE = BASE_DIR / "sessions.json"
@@ -75,6 +81,8 @@ AGENT_SYSTEM = (
     "Помнишь контекст разговора и используешь его в ответах.\n\n"
     + _projects.context_summary() + "\n\n"
     + orchestrator_context() + "\n\n"
+    "Для изменений проекта не выполняй слияние, публикацию или запуск в рабочей среде и не заявляй, "
+    "что они уже выполнены. После основного ответа Controller отдельно проверит подтверждения.\n\n"
     "Если пользователь спрашивает про статус/прогресс любого из этих проектов "
     "или просит что-то по ним сделать — используй эти сведения и команду /projects.\n\n"
     "Jarvis Architect (jarvis-architect) — твой субагент-мастерская: если пользователь просит "
@@ -1680,6 +1688,21 @@ async def _run_agent_and_reply(message: Message, bot: Bot, prompt: str,
 
     try:
         result = await _ask_ai(AGENT_SYSTEM, prompt, message.chat.id, image_path=image_path)
+        recent_user_context = "\n".join(
+            text for role, text in _history.get(message.chat.id, []) if role == "user"
+        )[-4000:]
+        if needs_controller_review(prompt, recent_user_context):
+            try:
+                controller_raw = await _ask_ai(
+                    controller_review_prompt(),
+                    build_controller_review_request(prompt, result),
+                    chat_id=None,
+                )
+                controller_report = format_controller_report(controller_raw)
+            except Exception:
+                log.exception("Controller review failed")
+                controller_report = "Заблокировано: контролёр не смог завершить проверку."
+            result += "\n\nПроверка контролёра:\n" + controller_report
     finally:
         done_event.set()
         ticker_task.cancel()
