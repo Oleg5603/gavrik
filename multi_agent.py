@@ -73,7 +73,7 @@ SUBORDINATE_AGENTS = {
 
 WORKFLOW = (
     "planner", "architect", "challenger", "developer", "reviewer", "qa",
-    "security", "controller", "ux_tester", "protector",
+    "security", "ux_tester", "protector", "controller",
 )
 
 QUALITY_GATES = {
@@ -118,6 +118,28 @@ class WorkflowState:
         approvals = set(self.data["approvals"])
         blockers = any(f.get("status") == "open" and f.get("severity") in {"critical", "high"} for f in self.data["findings"])
         return not blockers and all(item in approvals for item in required)
+
+
+def project_workflow_prompt() -> str:
+    """Build a concise, executable role-phase contract for project-change requests."""
+    phase_keys = tuple(key for key in WORKFLOW if key != "controller")
+    phases = []
+    for key in phase_keys:
+        role = ROLES[key]
+        phases.append(
+            f"- {role.title}: {role.mission} "
+            f"Deliver: {', '.join(role.outputs)}. Done when: {role.exit_condition}."
+        )
+    return (
+        "Выполни маршрут проекта как последовательные фазы одного оркестраторского прохода "
+        "(это не отдельные процессы и не независимые агенты). Передавай вывод предыдущей фазы "
+        "следующей. Для каждой фазы кратко зафиксируй статус и проверяемые основания; не выдумывай "
+        "выполнения или одобрения. Разработчик может менять файлы только в разрешённом рабочем "
+        "каталоге. Ревьюер и QA должны смотреть на фактический diff и результаты проверок. "
+        "Если проверки нельзя выполнить, пометь их незавершёнными. Не выполняй слияние, публикацию "
+        "или запуск в рабочей среде. Контролёр будет вызван отдельно после ответа и проверит отчёт.\n"
+        + "\n".join(phases)
+    )
 
 
 def needs_controller_review(message: str, recent_context: str = "") -> bool:
