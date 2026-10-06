@@ -1396,7 +1396,9 @@ async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = N
         full_prompt += f"\n\n(Прикреплённый файл — прочитай его инструментом Read: {image_path})"
     if AGENT_PROVIDER == "codex":
         return await _run_codex_subprocess(full_prompt, sandbox_mode="read-only" if read_only else "workspace-write")
-    return await _run_claude_subprocess(full_prompt)
+    return await _run_claude_subprocess(
+        full_prompt, permission_mode="plan" if read_only else "bypassPermissions"
+    )
 
 
 async def _run_codex_subprocess(full_prompt: str, sandbox_mode: str = "workspace-write") -> str:
@@ -1493,8 +1495,8 @@ async def _run_anthropic_sdk(system_prompt: str, user_message: str, chat_id: int
         return f"❌ Ошибка API: {e}"
 
 
-async def _run_claude_subprocess(full_prompt: str) -> str:
-    """Запуск claude через cmd /c с передачей промпта через stdin (Windows-совместимо)."""
+async def _run_claude_subprocess(full_prompt: str, permission_mode: str = "bypassPermissions") -> str:
+    """Запуск Claude CLI; Controller uses plan mode to prevent edits and commands."""
     import os
     env = {**os.environ}
     for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
@@ -1502,7 +1504,7 @@ async def _run_claude_subprocess(full_prompt: str) -> str:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "cmd", "/c", "claude", "--print", "--permission-mode", "bypassPermissions",
+            "cmd", "/c", "claude", "--print", "--permission-mode", permission_mode,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
