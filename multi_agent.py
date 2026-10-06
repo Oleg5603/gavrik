@@ -73,7 +73,7 @@ SUBORDINATE_AGENTS = {
 
 WORKFLOW = (
     "planner", "architect", "challenger", "developer", "reviewer", "qa",
-    "security", "controller", "ux_tester", "protector",
+    "security", "ux_tester", "protector", "controller",
 )
 
 QUALITY_GATES = {
@@ -113,11 +113,173 @@ class WorkflowState:
         self.save()
         return count
 
-    def gate_passed(self, gate: str) -> bool:
+    def record_event(self, event_type: str, **metadata) -> None:
+        """Persist compact audit metadata without storing prompts or model responses."""
+        from datetime import datetime, timezone
+
+        event = {"type": event_type, "at": datetime.now(timezone.utc).isoformat()}
+        for key in ("run_id", "role", "status", "gate"):
+            value = metadata.get(key)
+            if isinstance(value, (str, int, float, bool)):
+                event[key] = str(value)[:160] if isinstance(value, str) else value
+        self.data.setdefault("events", []).append(event)
+        self.data["events"] = self.data["events"][-500:]
+        self.save()
+
+    def gate_passed(self, gate: str, *, approvals=None, findings=None) -> bool:
         required = QUALITY_GATES[gate]
-        approvals = set(self.data["approvals"])
-        blockers = any(f.get("status") == "open" and f.get("severity") in {"critical", "high"} for f in self.data["findings"])
+        approvals = set(self.data["approvals"] if approvals is None else approvals)
+        findings = self.data["findings"] if findings is None else findings
+        blockers = any(
+            f.get("status") == "open" and f.get("severity") in {"critical", "high"}
+            for f in findings
+        )
         return not blockers and all(item in approvals for item in required)
+
+
+def project_workflow_roles(request: str = "") -> tuple[str, ...]:
+    """Return actual sequential model-call roles; Controller runs in its own final pass."""
+    phase_keys = [key for key in WORKFLOW if key != "controller"]
+    text = request.lower()
+    if any(word in text for word in (
+        "интерфейс", "экран", "кноп", "форма", "дизайн", "текст", "ui", "ux",
+    )):
+        insert_at = phase_keys.index("challenger")
+        phase_keys[insert_at:insert_at] = ["designer", "copywriter"]
+    return tuple(phase_keys)
+
+
+def project_workflow_prompt(request: str = "") -> str:
+    """Shared guardrails for the orchestrator around sequential role calls."""
+    role_titles = " → ".join(ROLES[key].title for key in project_workflow_roles(request))
+    return (
+        "Оркестратор должен вызывать указанные роли по одной, отдельными последовательными вызовами модели, "
+        "передавая каждой исходный запрос и краткие результаты предыдущих ролей. Это отдельные inference-вызовы, "
+        "но не фоновые процессы и не независимые worker-агенты. Ролевые результаты и статусы вызова записываются "
+        "в компактный журнал без текстов переписки. Маршрут: " + role_titles + ". "
+        "Developer работает с разрешёнными инструментами проекта; Reviewer, QA, Security, Protector и Controller "
+        "только читают и проверяют фактические артефакты. Не выдумывай выполнение, review approval или прохождение "
+        "тестов. Если инструмент недоступен, явно зафиксируй ограничение. Не сливай, не публикуй и не запускай "
+        "производственный релиз. Controller выполняется отдельно после всех обычных ролей."
+    )
+
+
+def role_gate_passed(role_key: str, raw: str) -> tuple[bool, str]:
+    """Validate Reviewer/QA JSON evidence; malformed output never opens a gate."""
+    expected = {"reviewer": "approved", "qa": "passed"}.get(role_key)
+    if expected is None:
+        return False, "роль не имеет настроенного quality gate"
+    candidate = raw.strip()
+    if candidate.startswith(chr(96) * 3):
+        lines = candidate.splitlines()
+        candidate = "\n".join(lines[1:-1]) if len(lines) >= 3 else candidate
+    try:
+        report = json.loads(candidate.strip())
+    except (TypeError, json.JSONDecodeError):
+        return False, "роль не вернула валидный JSON"
+    if not isinstance(report, dict) or report.get("status") not in {"approved", "passed", "blocked"}:
+        return False, "неизвестный статус gate"
+    checked = report.get("checked")
+    findings = report.get("findings")
+    if not isinstance(checked, list) or not checked or not all(isinstance(item, str) for item in checked):
+        return False, "нет проверяемых оснований"
+    if not isinstance(findings, list) or not all(isinstance(item, dict) for item in findings):
+        return False, "неверный список замечаний"
+    for finding in findings:
+        if finding.get("severity") not in {level.value for level in Severity} or not isinstance(finding.get("message"), str):
+            return False, "неверный формат замечания"
+    if report["status"] != expected:
+        return False, "роль не одобрила gate"
+    if any(item["severity"] in {"critical", "high"} for item in findings):
+        return False, "есть критическое или высокое замечание"
+    return True, "gate пройден"
+
+def needs_controller_review(message: str, recent_context: str = "") -> bool:
+    """Run Controller for project actions; use history only to resolve short follow-ups."""
+    current = message.lower()
+    history = recent_context.lower()
+    action_words = (
+        "созда", "сдела", "разработ", "исправ", "обнов", "включ", "запусти",
+        "развер", "измен", "настро", "проверь", "поправ", "внедри", "активиру",
+        "implement", "deploy", "release", "build", "fix", "launch",
+    )
+    scope_words = (
+        "бот", "агент", "систем", "код", "прилож", "проект", "репозитор",
+        "github", "автоматизац", "оркестратор", "контролёр", "контролер",
+        "workflow", "групп",
+    )
+    has_action = any(word in current for word in action_words)
+    has_scope = any(word in current for word in scope_words)
+    if has_action and has_scope:
+        return True
+    is_short_follow_up = len(current.split()) <= 5 and any(
+        word in current for word in ("исправ", "поправ", "продолж", "запусти", "включ", "сделай")
+    )
+    return is_short_follow_up and has_action and any(word in history for word in scope_words)
+
+
+def controller_review_prompt() -> str:
+    """Read-only system prompt for the separate Controller model pass."""
+    return (
+        ROLES["controller"].prompt()
+        + "\nЭто отдельный контрольный проход после основного ответа. Работай только на чтение: "
+        "не меняй файлы, не запускай команды с побочными эффектами, не отправляй сообщения, "
+        "не сливай и не публикуй изменения. Проверь, действительно ли были выполнены заявленные "
+        "этапы и есть ли подтверждающие результаты; не считай описание роли доказательством её запуска. "
+        "Если невозможно проверить запуск роли или важный результат, укажи это как блокер, а не выдумывай. "
+        "Верни краткий JSON с полями status (pass/block/needs_human), checked (массив фактов), "
+        "findings (массив объектов severity/message) и next_action. Статусы pass/block допустимы "
+        "только при наличии фактических оснований."
+    )
+
+
+def build_controller_review_request(request: str, proposed_result: str) -> str:
+    return (
+        "Проведи контроль итогов запроса.\n"
+        f"Запрос пользователя:\n{request}\n\n"
+        f"Ответ и выполненные действия основного прохода:\n{proposed_result}\n\n"
+        "Проверь evidence для выполненных этапов, NFR, незакрытые critical/high замечания и "
+        "обязательные подтверждения. Если был заявлен запуск группы ролей, установи по доступным "
+        "артефактам, что роли действительно исполнялись, а не только перечислены в инструкции."
+    )
+
+
+def format_controller_report(raw: str) -> str:
+    """Validate and render the Controller's JSON report; malformed output fails closed."""
+    try:
+        report = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return "Заблокировано: контролёр не вернул проверяемый отчёт JSON."
+
+    if not isinstance(report, dict):
+        return "Заблокировано: неверный формат отчёта контролёра."
+    status = report.get("status")
+    if status not in {"pass", "block", "needs_human"}:
+        return "Заблокировано: в отчёте контролёра неизвестный статус."
+
+    findings = report.get("findings")
+    checked = report.get("checked")
+    if not isinstance(findings, list) or not all(isinstance(item, dict) for item in findings):
+        return "Заблокировано: неверный формат замечаний контролёра."
+    if not isinstance(checked, list) or not checked or not all(isinstance(item, str) for item in checked):
+        return "Заблокировано: контролёр не указал проверяемые факты."
+    for item in findings:
+        if item.get("severity") not in {level.value for level in Severity} or not isinstance(item.get("message"), str):
+            return "Заблокировано: в замечании контролёра нет допустимой критичности или описания."
+    if any(item["severity"] in {Severity.CRITICAL.value, Severity.HIGH.value} for item in findings):
+        status = "block"
+
+    labels = {"pass": "Проверка пройдена", "block": "Заблокировано", "needs_human": "Нужен человек"}
+    lines = [labels[status]]
+    lines.extend(f"Проверено: {item[:400]}" for item in checked[:12])
+    for item in findings[:20]:
+        severity = item["severity"]
+        message = item["message"][:500]
+        lines.append(f"Замечание [{severity}]: {message}")
+    next_action = report.get("next_action")
+    if isinstance(next_action, str) and next_action:
+        lines.append(f"Дальше: {next_action}")
+    return "\n".join(lines)
 
 
 def orchestrator_context() -> str:
@@ -126,5 +288,8 @@ def orchestrator_context() -> str:
         f"Система «{SYSTEM_NAME}», группа агентов «{GROUP_NAME}»: " + names + ". "
         "Маршрут: " + " → ".join(WORKFLOW) + ". "
         "Максимум 3 итерации в каждом цикле; затем обязательная эскалация человеку. "
-        "Архитектура и релиз требуют human approval; critical/high замечания блокируют следующий gate."
+        "Архитектура и релиз требуют human approval; critical/high замечания блокируют следующий gate. "
+        "Для каждого изменяющего запроса проекта/бота запускается отдельная read-only проверка "
+        "ролью Controller. Не заявляй, что другие роли исполнялись, если нет их реальных выходов "
+        "или записей в журнале. До прохождения обязательных gate не сливай и не запускай релиз."
     )

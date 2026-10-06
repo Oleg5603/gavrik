@@ -3,6 +3,7 @@ import logging
 import subprocess
 import asyncio
 import sys
+import uuid
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
 import aiohttp
@@ -24,13 +25,131 @@ from memory_graph import MemoryGraph
 import projects_registry as _projects
 import vk_lead_parser as _lead_parser
 import media as _media
-from multi_agent import orchestrator_context
+from multi_agent import (
+    orchestrator_context,
+    project_workflow_prompt,
+    project_workflow_roles,
+    ROLES,
+    needs_controller_review,
+    controller_review_prompt,
+    build_controller_review_request,
+    format_controller_report,
+    role_gate_passed,
+    WorkflowState,
+)
 
 _memory = MemoryGraph(BASE_DIR / "knowledge_graph.jsonl")
 _SESSIONS_FILE = BASE_DIR / "sessions.json"
 
 log = logging.getLogger(__name__)
 router = Router()
+
+
+def _record_workflow_event(event_type: str, **metadata) -> None:
+    """Write only bounded workflow metadata; never persist prompts or model output."""
+    try:
+        state = WorkflowState(BASE_DIR / "workflow_state.json")
+        state.record_event(event_type, **metadata)
+    except Exception:
+        log.exception("Не удалось записать событие рабочего процесса")
+
+
+async def _run_project_role_passes(
+    request: str,
+    recent_user_context: str,
+    run_id: str,
+    image_path: Path | None = None,
+) -> str:
+    """Run each project role in a separate sequential model call and journal call status."""
+    roles = project_workflow_roles(request + "\n" + recent_user_context)
+    contract = project_workflow_prompt(request + "\n" + recent_user_context)
+    outputs: list[tuple[str, str]] = []
+    gate_approvals: set[str] = set()
+    gate_findings: list[dict] = []
+
+    for role_key in roles:
+        role = ROLES[role_key]
+        read_only = role_key != "developer"
+        role_system = AGENT_SYSTEM + "\n\n" + contract + "\n\n" + role.prompt()
+        if read_only:
+            role_system += (
+                "\nПроверяй только чтением: не меняй файлы, не отправляй сообщения и не выполняй "
+                "необратимые действия. Отчёт отделяй на факты, выводы и незакрытые риски."
+            )
+        else:
+            role_system += (
+                "\nВноси только минимальные изменения в рамках прямого запроса и разрешённых "
+                "инструментов. Не выполняй слияние, публикацию или production deploy."
+            )
+        if role_key == "reviewer":
+            role_system += (
+                "\nВ конце верни JSON-объект: status=approved или blocked, checked=[конкретные факты], "
+                "findings=[{severity,message}]. Без фактической проверки diff верни blocked."
+            )
+        elif role_key == "qa":
+            role_system += (
+                "\nВ конце верни JSON-объект: status=passed или blocked, checked=[конкретные результаты], "
+                "findings=[{severity,message}]. Не заявляй тесты, которые фактически не запускал."
+            )
+
+        prior = "\n\n".join(
+            f"Результат роли {ROLES[key].title}:\n{text[:1800]}"
+            for key, text in outputs[-4:]
+        )
+        role_message = (
+            f"Исходный запрос пользователя:\n{request}\n\n"
+            f"Недавний контекст пользователя:\n{recent_user_context[-2500:]}\n\n"
+            f"Предыдущие результаты:\n{prior or 'Это первый этап.'}\n\n"
+            "Выполни только свой этап и передай результат следующей роли."
+        )
+        _record_workflow_event(
+            "role_call_started", run_id=run_id, role=role_key, status="started"
+        )
+        output = await _ask_ai(
+            role_system,
+            role_message,
+            chat_id=None,
+            image_path=image_path if not outputs else None,
+            read_only=read_only,
+        )
+        outputs.append((role_key, output))
+        _record_workflow_event(
+            "role_call_completed", run_id=run_id, role=role_key, status="call_completed"
+        )
+        if role_key in {"reviewer", "qa"}:
+            passed, reason = role_gate_passed(role_key, output)
+            if passed:
+                gate_approvals.add(role_key)
+            else:
+                gate_findings.append({"severity": "high", "status": "open"})
+                outputs[-1] = (
+                    role_key,
+                    output + f"\n\nGate {role_key}: BLOCKED — {reason}.",
+                )
+            _record_workflow_event(
+                "quality_gate_evaluated", run_id=run_id, role=role_key,
+                gate="implementation", status="passed" if passed else "blocked",
+            )
+            if role_key == "qa":
+                gate_passed = WorkflowState(BASE_DIR / "workflow_state.json").gate_passed(
+                    "implementation", approvals=gate_approvals, findings=gate_findings
+                )
+                _record_workflow_event(
+                    "quality_gate_completed", run_id=run_id, role="orchestrator",
+                    gate="implementation", status="passed" if gate_passed else "blocked",
+                )
+                if not gate_passed:
+                    outputs.append((
+                        "orchestrator",
+                        "Gate реализации заблокирован: Reviewer не одобрил фактический diff "
+                        "и QA не подтвердил проверки. Security и Protector не запускаются.",
+                    ))
+                    break
+
+    return "\n\n".join(
+        f"## {ROLES[key].title}\n{text[:5000]}"
+        for key, text in outputs
+    )
 
 # Режимы и история — загружаются из файла, переживают перезапуск
 _history: dict[int, list]
@@ -75,6 +194,8 @@ AGENT_SYSTEM = (
     "Помнишь контекст разговора и используешь его в ответах.\n\n"
     + _projects.context_summary() + "\n\n"
     + orchestrator_context() + "\n\n"
+    "Для изменений проекта не выполняй слияние, публикацию или запуск в рабочей среде и не заявляй, "
+    "что они уже выполнены. После основного ответа Controller отдельно проверит подтверждения.\n\n"
     "Если пользователь спрашивает про статус/прогресс любого из этих проектов "
     "или просит что-то по ним сделать — используй эти сведения и команду /projects.\n\n"
     "Jarvis Architect (jarvis-architect) — твой субагент-мастерская: если пользователь просит "
@@ -1350,7 +1471,7 @@ def _session_history_text(chat_id: int | None) -> str:
 
 
 async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = None,
-                   image_path: Path | None = None) -> str:
+                   image_path: Path | None = None, read_only: bool = False) -> str:
     """
     Единая точка вызова AI.
     1. Если ANTHROPIC_API_KEY — прямой SDK (быстро, надёжно), история идёт как messages[].
@@ -1375,11 +1496,13 @@ async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = N
     if image_path is not None:
         full_prompt += f"\n\n(Прикреплённый файл — прочитай его инструментом Read: {image_path})"
     if AGENT_PROVIDER == "codex":
-        return await _run_codex_subprocess(full_prompt)
-    return await _run_claude_subprocess(full_prompt)
+        return await _run_codex_subprocess(full_prompt, sandbox_mode="read-only" if read_only else "workspace-write")
+    return await _run_claude_subprocess(
+        full_prompt, permission_mode="plan" if read_only else "bypassPermissions"
+    )
 
 
-async def _run_codex_subprocess(full_prompt: str) -> str:
+async def _run_codex_subprocess(full_prompt: str, sandbox_mode: str = "workspace-write") -> str:
     """Run one non-interactive Codex turn, passing the prompt over stdin."""
     import os
     env = {**os.environ}
@@ -1388,7 +1511,8 @@ async def _run_codex_subprocess(full_prompt: str) -> str:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            CODEX_BIN, "exec", "--skip-git-repo-check", "-C", str(BASE_DIR), "-",
+            CODEX_BIN, "exec", "--skip-git-repo-check", "-C", str(BASE_DIR),
+            "--sandbox", sandbox_mode, "-",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1472,8 +1596,8 @@ async def _run_anthropic_sdk(system_prompt: str, user_message: str, chat_id: int
         return f"❌ Ошибка API: {e}"
 
 
-async def _run_claude_subprocess(full_prompt: str) -> str:
-    """Запуск claude через cmd /c с передачей промпта через stdin (Windows-совместимо)."""
+async def _run_claude_subprocess(full_prompt: str, permission_mode: str = "bypassPermissions") -> str:
+    """Запуск Claude CLI; Controller uses plan mode to prevent edits and commands."""
     import os
     env = {**os.environ}
     for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
@@ -1481,7 +1605,7 @@ async def _run_claude_subprocess(full_prompt: str) -> str:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "cmd", "/c", "claude", "--print", "--permission-mode", "bypassPermissions",
+            "cmd", "/c", "claude", "--print", "--permission-mode", permission_mode,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1679,7 +1803,54 @@ async def _run_agent_and_reply(message: Message, bot: Bot, prompt: str,
     ticker_task = asyncio.create_task(_ticker())
 
     try:
-        result = await _ask_ai(AGENT_SYSTEM, prompt, message.chat.id, image_path=image_path)
+        recent_user_context = "\n".join(
+            text for role, text in _history.get(message.chat.id, []) if role == "user"
+        )[-4000:]
+        project_task = needs_controller_review(prompt, recent_user_context)
+        workflow_run_id = uuid.uuid4().hex[:16] if project_task else None
+        try:
+            if project_task:
+                _record_workflow_event(
+                    "project_workflow_started", run_id=workflow_run_id, role="orchestrator", status="started"
+                )
+                result = await _run_project_role_passes(
+                    prompt, recent_user_context, workflow_run_id, image_path=image_path
+                )
+                _record_workflow_event(
+                    "project_workflow_completed", run_id=workflow_run_id,
+                    role="orchestrator", status="completed",
+                )
+            else:
+                result = await _ask_ai(
+                    AGENT_SYSTEM, prompt, message.chat.id, image_path=image_path
+                )
+        except Exception:
+            if project_task:
+                _record_workflow_event(
+                    "project_workflow_failed", run_id=workflow_run_id, role="orchestrator", status="failed"
+                )
+            raise
+            try:
+                controller_raw = await _ask_ai(
+                    controller_review_prompt(),
+                    build_controller_review_request(prompt, result),
+                    chat_id=None,
+                    read_only=True,
+                )
+                controller_report = format_controller_report(controller_raw)
+            except Exception:
+                log.exception("Controller review failed")
+                controller_report = "Заблокировано: контролёр не смог завершить проверку."
+            controller_status = (
+                "pass" if controller_report.startswith("Проверка пройдена")
+                else "needs_human" if controller_report.startswith("Нужен человек")
+                else "block"
+            )
+            _record_workflow_event(
+                "controller_pass_completed", run_id=workflow_run_id,
+                role="controller", status=controller_status,
+            )
+            result += "\n\nПроверка контролёра:\n" + controller_report
     finally:
         done_event.set()
         ticker_task.cancel()
