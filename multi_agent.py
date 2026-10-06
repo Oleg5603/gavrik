@@ -126,10 +126,14 @@ class WorkflowState:
         self.data["events"] = self.data["events"][-500:]
         self.save()
 
-    def gate_passed(self, gate: str) -> bool:
+    def gate_passed(self, gate: str, *, approvals=None, findings=None) -> bool:
         required = QUALITY_GATES[gate]
-        approvals = set(self.data["approvals"])
-        blockers = any(f.get("status") == "open" and f.get("severity") in {"critical", "high"} for f in self.data["findings"])
+        approvals = set(self.data["approvals"] if approvals is None else approvals)
+        findings = self.data["findings"] if findings is None else findings
+        blockers = any(
+            f.get("status") == "open" and f.get("severity") in {"critical", "high"}
+            for f in findings
+        )
         return not blockers and all(item in approvals for item in required)
 
 
@@ -159,6 +163,32 @@ def project_workflow_prompt(request: str = "") -> str:
         "производственный релиз. Controller выполняется отдельно после всех обычных ролей."
     )
 
+
+def role_gate_passed(role_key: str, raw: str) -> tuple[bool, str]:
+    """Validate Reviewer/QA JSON evidence; malformed output never opens a gate."""
+    expected = {"reviewer": "approved", "qa": "passed"}.get(role_key)
+    if expected is None:
+        return False, "роль не имеет настроенного quality gate"
+    try:
+        report = json.loads(raw.strip())
+    except (TypeError, json.JSONDecodeError):
+        return False, "роль не вернула валидный JSON"
+    if not isinstance(report, dict) or report.get("status") not in {"approved", "passed", "blocked"}:
+        return False, "неизвестный статус gate"
+    checked = report.get("checked")
+    findings = report.get("findings")
+    if not isinstance(checked, list) or not checked or not all(isinstance(item, str) for item in checked):
+        return False, "нет проверяемых оснований"
+    if not isinstance(findings, list) or not all(isinstance(item, dict) for item in findings):
+        return False, "неверный список замечаний"
+    for finding in findings:
+        if finding.get("severity") not in {level.value for level in Severity} or not isinstance(finding.get("message"), str):
+            return False, "неверный формат замечания"
+    if report["status"] != expected:
+        return False, "роль не одобрила gate"
+    if any(item["severity"] in {"critical", "high"} for item in findings):
+        return False, "есть критическое или высокое замечание"
+    return True, "gate пройден"
 
 def needs_controller_review(message: str, recent_context: str = "") -> bool:
     """Run Controller for project actions; use history only to resolve short follow-ups."""
