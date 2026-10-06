@@ -169,8 +169,12 @@ def role_gate_passed(role_key: str, raw: str) -> tuple[bool, str]:
     expected = {"reviewer": "approved", "qa": "passed"}.get(role_key)
     if expected is None:
         return False, "роль не имеет настроенного quality gate"
+    candidate = raw.strip()
+    if candidate.startswith(chr(96) * 3):
+        lines = candidate.splitlines()
+        candidate = "\n".join(lines[1:-1]) if len(lines) >= 3 else candidate
     try:
-        report = json.loads(raw.strip())
+        report = json.loads(candidate.strip())
     except (TypeError, json.JSONDecodeError):
         return False, "роль не вернула валидный JSON"
     if not isinstance(report, dict) or report.get("status") not in {"approved", "passed", "blocked"}:
