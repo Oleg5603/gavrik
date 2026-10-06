@@ -25,6 +25,7 @@ import projects_registry as _projects
 import vk_lead_parser as _lead_parser
 import media as _media
 from multi_agent import orchestrator_context
+from travel_search import build_travel_search_context
 
 _memory = MemoryGraph(BASE_DIR / "knowledge_graph.jsonl")
 _SESSIONS_FILE = BASE_DIR / "sessions.json"
@@ -1679,7 +1680,8 @@ async def _run_agent_and_reply(message: Message, bot: Bot, prompt: str,
     ticker_task = asyncio.create_task(_ticker())
 
     try:
-        result = await _ask_ai(AGENT_SYSTEM, prompt, message.chat.id, image_path=image_path)
+        travel_context = build_travel_search_context(prompt, BASE_DIR / "travel_search.json")
+        result = await _ask_ai(AGENT_SYSTEM + travel_context, prompt, message.chat.id, image_path=image_path)
     finally:
         done_event.set()
         ticker_task.cancel()
