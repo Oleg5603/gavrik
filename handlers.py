@@ -1358,7 +1358,7 @@ def _session_history_text(chat_id: int | None) -> str:
 
 
 async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = None,
-                   image_path: Path | None = None) -> str:
+                   image_path: Path | None = None, read_only: bool = False) -> str:
     """
     Единая точка вызова AI.
     1. Если ANTHROPIC_API_KEY — прямой SDK (быстро, надёжно), история идёт как messages[].
@@ -1383,11 +1383,11 @@ async def _ask_ai(system_prompt: str, user_message: str, chat_id: int | None = N
     if image_path is not None:
         full_prompt += f"\n\n(Прикреплённый файл — прочитай его инструментом Read: {image_path})"
     if AGENT_PROVIDER == "codex":
-        return await _run_codex_subprocess(full_prompt)
+        return await _run_codex_subprocess(full_prompt, sandbox_mode="read-only" if read_only else "workspace-write")
     return await _run_claude_subprocess(full_prompt)
 
 
-async def _run_codex_subprocess(full_prompt: str) -> str:
+async def _run_codex_subprocess(full_prompt: str, sandbox_mode: str = "workspace-write") -> str:
     """Run one non-interactive Codex turn, passing the prompt over stdin."""
     import os
     env = {**os.environ}
@@ -1396,7 +1396,8 @@ async def _run_codex_subprocess(full_prompt: str) -> str:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            CODEX_BIN, "exec", "--skip-git-repo-check", "-C", str(BASE_DIR), "-",
+            CODEX_BIN, "exec", "--skip-git-repo-check", "-C", str(BASE_DIR),
+            "--sandbox", sandbox_mode, "-",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1697,6 +1698,7 @@ async def _run_agent_and_reply(message: Message, bot: Bot, prompt: str,
                     controller_review_prompt(),
                     build_controller_review_request(prompt, result),
                     chat_id=None,
+                    read_only=True,
                 )
                 controller_report = format_controller_report(controller_raw)
             except Exception:
