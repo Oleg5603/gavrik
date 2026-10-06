@@ -113,6 +113,19 @@ class WorkflowState:
         self.save()
         return count
 
+    def record_event(self, event_type: str, **metadata) -> None:
+        """Persist compact audit metadata without storing prompts or model responses."""
+        from datetime import datetime, timezone
+
+        event = {"type": event_type, "at": datetime.now(timezone.utc).isoformat()}
+        for key in ("run_id", "role", "status", "gate"):
+            value = metadata.get(key)
+            if isinstance(value, (str, int, float, bool)):
+                event[key] = str(value)[:160] if isinstance(value, str) else value
+        self.data.setdefault("events", []).append(event)
+        self.data["events"] = self.data["events"][-500:]
+        self.save()
+
     def gate_passed(self, gate: str) -> bool:
         required = QUALITY_GATES[gate]
         approvals = set(self.data["approvals"])
@@ -120,9 +133,17 @@ class WorkflowState:
         return not blockers and all(item in approvals for item in required)
 
 
-def project_workflow_prompt() -> str:
-    """Build a concise, executable role-phase contract for project-change requests."""
-    phase_keys = tuple(key for key in WORKFLOW if key != "controller")
+def project_workflow_prompt(request: str = "") -> str:
+    """Build a truthful, scoped role-phase contract for project-change requests."""
+    phase_keys = [key for key in WORKFLOW if key != "controller"]
+    text = request.lower()
+    has_ui_work = any(word in text for word in (
+        "интерфейс", "экран", "кноп", "форма", "дизайн", "текст", "ui", "ux",
+    ))
+    if has_ui_work:
+        insert_at = phase_keys.index("challenger")
+        phase_keys[insert_at:insert_at] = ["designer", "copywriter"]
+
     phases = []
     for key in phase_keys:
         role = ROLES[key]
@@ -130,32 +151,46 @@ def project_workflow_prompt() -> str:
             f"- {role.title}: {role.mission} "
             f"Deliver: {', '.join(role.outputs)}. Done when: {role.exit_condition}."
         )
+    approval_rule = (
+        "Перед реализацией проверь историю чата на явное подтверждение архитектуры именно для этой задачи. "
+        "Если подтверждения нет, остановись после Challenger, покажи короткий проект и запроси подтверждение; "
+        "Developer и последующие роли пока не запускай."
+    )
     return (
         "Выполни маршрут проекта как последовательные фазы одного оркестраторского прохода "
-        "(это не отдельные процессы и не независимые агенты). Передавай вывод предыдущей фазы "
-        "следующей. Для каждой фазы кратко зафиксируй статус и проверяемые основания; не выдумывай "
-        "выполнения или одобрения. Разработчик может менять файлы только в разрешённом рабочем "
-        "каталоге. Ревьюер и QA должны смотреть на фактический diff и результаты проверок. "
-        "Если проверки нельзя выполнить, пометь их незавершёнными. Не выполняй слияние, публикацию "
-        "или запуск в рабочей среде. Контролёр будет вызван отдельно после ответа и проверит отчёт.\n"
+        "(это один вызов модели с ролевыми фазами, не отдельные процессы и не независимые агенты). "
+        "Передавай вывод предыдущей фазы следующей. Для каждой фазы кратко зафиксируй статус и проверяемые "
+        "основания; не выдумывай выполнения или одобрения. " + approval_rule + " "
+        "Разработчик может менять файлы только в разрешённом рабочем каталоге. Ревьюер и QA должны смотреть "
+        "на фактический diff и результаты проверок. Если проверки нельзя выполнить, пометь их незавершёнными. "
+        "Не выполняй слияние, публикацию или запуск в рабочей среде. Контролёр будет вызван отдельным "
+        "read-only проходом после ответа и проверит отчёт.\n"
         + "\n".join(phases)
     )
 
 
 def needs_controller_review(message: str, recent_context: str = "") -> bool:
-    """Run a separate read-only Controller pass for actionable project/system work."""
-    text = f"{recent_context}\n{message}".lower()
-    action = any(word in text for word in (
+    """Run Controller for project actions; use history only to resolve short follow-ups."""
+    current = message.lower()
+    history = recent_context.lower()
+    action_words = (
         "созда", "сдела", "разработ", "исправ", "обнов", "включ", "запусти",
         "развер", "измен", "настро", "проверь", "поправ", "внедри", "активиру",
         "implement", "deploy", "release", "build", "fix", "launch",
-    ))
-    scope = any(word in text for word in (
+    )
+    scope_words = (
         "бот", "агент", "систем", "код", "прилож", "проект", "репозитор",
         "github", "автоматизац", "оркестратор", "контролёр", "контролер",
         "workflow", "групп",
-    ))
-    return action and scope
+    )
+    has_action = any(word in current for word in action_words)
+    has_scope = any(word in current for word in scope_words)
+    if has_action and has_scope:
+        return True
+    is_short_follow_up = len(current.split()) <= 5 and any(
+        word in current for word in ("исправ", "поправ", "продолж", "запусти", "включ", "сделай")
+    )
+    return is_short_follow_up and has_action and any(word in history for word in scope_words)
 
 
 def controller_review_prompt() -> str:
@@ -197,25 +232,25 @@ def format_controller_report(raw: str) -> str:
     if status not in {"pass", "block", "needs_human"}:
         return "Заблокировано: в отчёте контролёра неизвестный статус."
 
-    findings = report.get("findings", [])
-    if not isinstance(findings, list):
+    findings = report.get("findings")
+    checked = report.get("checked")
+    if not isinstance(findings, list) or not all(isinstance(item, dict) for item in findings):
         return "Заблокировано: неверный формат замечаний контролёра."
-    if any(
-        isinstance(item, dict) and item.get("severity") in {Severity.CRITICAL.value, Severity.HIGH.value}
-        for item in findings
-    ):
+    if not isinstance(checked, list) or not checked or not all(isinstance(item, str) for item in checked):
+        return "Заблокировано: контролёр не указал проверяемые факты."
+    for item in findings:
+        if item.get("severity") not in {level.value for level in Severity} or not isinstance(item.get("message"), str):
+            return "Заблокировано: в замечании контролёра нет допустимой критичности или описания."
+    if any(item["severity"] in {Severity.CRITICAL.value, Severity.HIGH.value} for item in findings):
         status = "block"
 
     labels = {"pass": "Проверка пройдена", "block": "Заблокировано", "needs_human": "Нужен человек"}
     lines = [labels[status]]
-    checked = report.get("checked", [])
-    if isinstance(checked, list):
-        lines.extend(f"Проверено: {item}" for item in checked if isinstance(item, str))
-    for item in findings:
-        if isinstance(item, dict):
-            severity = item.get("severity", "unknown")
-            message = item.get("message", "Без описания")
-            lines.append(f"Замечание [{severity}]: {message}")
+    lines.extend(f"Проверено: {item[:400]}" for item in checked[:12])
+    for item in findings[:20]:
+        severity = item["severity"]
+        message = item["message"][:500]
+        lines.append(f"Замечание [{severity}]: {message}")
     next_action = report.get("next_action")
     if isinstance(next_action, str) and next_action:
         lines.append(f"Дальше: {next_action}")
