@@ -9,6 +9,7 @@ from multi_agent import (
     format_controller_report,
     needs_controller_review,
     project_workflow_prompt,
+    project_workflow_roles,
     WorkflowState,
 )
 
@@ -32,8 +33,8 @@ class ControllerReviewTests(unittest.TestCase):
         prompt = project_workflow_prompt("Добавь кнопку настройки")
         self.assertIn("Дизайнер", prompt)
         self.assertIn("Копирайтер", prompt)
-        self.assertIn("остановись после Challenger", prompt)
-        self.assertNotIn("Дизайнер", project_workflow_prompt("Проверь расчёт"))
+        self.assertIn("отдельными последовательными вызовами модели", prompt)
+        self.assertNotIn("designer", project_workflow_roles("Проверь расчёт"))
 
     def test_workflow_events_are_compact_and_do_not_store_prompts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -59,16 +60,18 @@ class ControllerReviewTests(unittest.TestCase):
         })
         self.assertTrue(format_controller_report(raw).startswith("Заблокировано"))
 
-    def test_builds_role_phases_in_declared_order(self):
-        prompt = project_workflow_prompt()
-        ordered = ["Планировщик", "Архитектор", "Адверсарий", "Разработчик",
-                   "Ревьюер", "Тестировщик QA", "Security Auditor",
-                   "UX Тестировщик", "Инженер по целостности"]
-        positions = [prompt.index(label) for label in ordered]
-        self.assertEqual(sorted(positions), positions)
-        self.assertIn("последовательные фазы", prompt)
-        self.assertIn("не отдельные процессы", prompt)
-        self.assertIn("Контролёр будет вызван отдельно", prompt)
+    def test_builds_separate_role_calls_in_declared_order(self):
+        roles = project_workflow_roles("исправь систему")
+        expected = ["planner", "architect", "challenger", "developer", "reviewer",
+                    "qa", "security", "ux_tester", "protector"]
+        self.assertEqual(roles, tuple(expected))
+        self.assertNotIn("controller", roles)
+        self.assertIn("отдельные последовательные вызовы модели", project_workflow_prompt())
+
+    def test_ui_work_routes_through_designer_and_copywriter(self):
+        roles = project_workflow_roles("Добавь экран и кнопку")
+        self.assertLess(roles.index("designer"), roles.index("challenger"))
+        self.assertLess(roles.index("copywriter"), roles.index("challenger"))
 
     def test_controller_is_read_only_and_demands_evidence(self):
         prompt = controller_review_prompt()
