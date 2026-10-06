@@ -1,5 +1,7 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from multi_agent import (
     build_controller_review_request,
@@ -7,6 +9,7 @@ from multi_agent import (
     format_controller_report,
     needs_controller_review,
     project_workflow_prompt,
+    WorkflowState,
 )
 
 
@@ -18,6 +21,43 @@ class ControllerReviewTests(unittest.TestCase):
     def test_skips_general_questions(self):
         self.assertFalse(needs_controller_review("Что делает контролёр системы?"))
         self.assertFalse(needs_controller_review("Найди авиабилеты", "проект отпуск"))
+
+    def test_old_project_history_does_not_trigger_on_unrelated_question(self):
+        self.assertFalse(needs_controller_review(
+            "Что такое контролёр?",
+            "Исправь код системы Гаврика",
+        ))
+
+    def test_ui_requests_include_design_and_copy_phases(self):
+        prompt = project_workflow_prompt("Добавь кнопку настройки")
+        self.assertIn("Дизайнер", prompt)
+        self.assertIn("Копирайтер", prompt)
+        self.assertIn("остановись после Challenger", prompt)
+        self.assertNotIn("Дизайнер", project_workflow_prompt("Проверь расчёт"))
+
+    def test_workflow_events_are_compact_and_do_not_store_prompts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = WorkflowState(Path(tmp) / "workflow_state.json")
+            state.record_event(
+                "controller_pass_completed",
+                run_id="abc123",
+                role="controller",
+                status="pass",
+                prompt="secret chat content",
+            )
+            saved = json.loads((Path(tmp) / "workflow_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["events"][0]["status"], "pass")
+            self.assertNotIn("secret chat content", json.dumps(saved, ensure_ascii=False))
+            self.assertNotIn("prompt", saved["events"][0])
+
+    def test_controller_requires_evidence(self):
+        raw = json.dumps({
+            "status": "pass",
+            "checked": [],
+            "findings": [],
+            "next_action": "continue",
+        })
+        self.assertTrue(format_controller_report(raw).startswith("Заблокировано"))
 
     def test_builds_role_phases_in_declared_order(self):
         prompt = project_workflow_prompt()
