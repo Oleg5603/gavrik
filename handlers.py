@@ -34,6 +34,7 @@ from multi_agent import (
     controller_review_prompt,
     build_controller_review_request,
     format_controller_report,
+    role_gate_passed,
     WorkflowState,
 )
 
@@ -63,6 +64,8 @@ async def _run_project_role_passes(
     roles = project_workflow_roles(request + "\n" + recent_user_context)
     contract = project_workflow_prompt(request + "\n" + recent_user_context)
     outputs: list[tuple[str, str]] = []
+    gate_approvals: set[str] = set()
+    gate_findings: list[dict] = []
 
     for role_key in roles:
         role = ROLES[role_key]
@@ -77,6 +80,16 @@ async def _run_project_role_passes(
             role_system += (
                 "\nВноси только минимальные изменения в рамках прямого запроса и разрешённых "
                 "инструментов. Не выполняй слияние, публикацию или production deploy."
+            )
+        if role_key == "reviewer":
+            role_system += (
+                "\nВ конце верни JSON-объект: status=approved или blocked, checked=[конкретные факты], "
+                "findings=[{severity,message}]. Без фактической проверки diff верни blocked."
+            )
+        elif role_key == "qa":
+            role_system += (
+                "\nВ конце верни JSON-объект: status=passed или blocked, checked=[конкретные результаты], "
+                "findings=[{severity,message}]. Не заявляй тесты, которые фактически не запускал."
             )
 
         prior = "\n\n".join(
@@ -103,6 +116,35 @@ async def _run_project_role_passes(
         _record_workflow_event(
             "role_call_completed", run_id=run_id, role=role_key, status="call_completed"
         )
+        if role_key in {"reviewer", "qa"}:
+            passed, reason = role_gate_passed(role_key, output)
+            if passed:
+                gate_approvals.add(role_key)
+            else:
+                gate_findings.append({"severity": "high", "status": "open"})
+                outputs[-1] = (
+                    role_key,
+                    output + f"\n\nGate {role_key}: BLOCKED — {reason}.",
+                )
+            _record_workflow_event(
+                "quality_gate_evaluated", run_id=run_id, role=role_key,
+                gate="implementation", status="passed" if passed else "blocked",
+            )
+            if role_key == "qa":
+                gate_passed = WorkflowState(BASE_DIR / "workflow_state.json").gate_passed(
+                    "implementation", approvals=gate_approvals, findings=gate_findings
+                )
+                _record_workflow_event(
+                    "quality_gate_completed", run_id=run_id, role="orchestrator",
+                    gate="implementation", status="passed" if gate_passed else "blocked",
+                )
+                if not gate_passed:
+                    outputs.append((
+                        "orchestrator",
+                        "Gate реализации заблокирован: Reviewer не одобрил фактический diff "
+                        "и QA не подтвердил проверки. Security и Protector не запускаются.",
+                    ))
+                    break
 
     return "\n\n".join(
         f"## {ROLES[key].title}\n{text[:5000]}"
