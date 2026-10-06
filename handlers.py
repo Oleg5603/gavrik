@@ -3,6 +3,7 @@ import logging
 import subprocess
 import asyncio
 import sys
+import uuid
 from datetime import datetime, timedelta, time as dt_time
 from pathlib import Path
 import aiohttp
@@ -31,6 +32,7 @@ from multi_agent import (
     controller_review_prompt,
     build_controller_review_request,
     format_controller_report,
+    WorkflowState,
 )
 
 _memory = MemoryGraph(BASE_DIR / "knowledge_graph.jsonl")
@@ -38,6 +40,15 @@ _SESSIONS_FILE = BASE_DIR / "sessions.json"
 
 log = logging.getLogger(__name__)
 router = Router()
+
+
+def _record_workflow_event(event_type: str, **metadata) -> None:
+    """Write only bounded workflow metadata; never persist prompts or model output."""
+    try:
+        state = WorkflowState(BASE_DIR / "workflow_state.json")
+        state.record_event(event_type, **metadata)
+    except Exception:
+        log.exception("Не удалось записать событие рабочего процесса")
 
 # Режимы и история — загружаются из файла, переживают перезапуск
 _history: dict[int, list]
@@ -1693,11 +1704,26 @@ async def _run_agent_and_reply(message: Message, bot: Bot, prompt: str,
             text for role, text in _history.get(message.chat.id, []) if role == "user"
         )[-4000:]
         project_task = needs_controller_review(prompt, recent_user_context)
+        workflow_run_id = uuid.uuid4().hex[:16] if project_task else None
         agent_system = AGENT_SYSTEM
         if project_task:
-            agent_system += "\n\n" + project_workflow_prompt()
-        result = await _ask_ai(agent_system, prompt, message.chat.id, image_path=image_path)
+            _record_workflow_event(
+                "project_workflow_started", run_id=workflow_run_id, role="orchestrator", status="started"
+            )
+            agent_system += "\n\n" + project_workflow_prompt(prompt)
+        try:
+            result = await _ask_ai(agent_system, prompt, message.chat.id, image_path=image_path)
+        except Exception:
+            if project_task:
+                _record_workflow_event(
+                    "project_workflow_failed", run_id=workflow_run_id, role="orchestrator", status="failed"
+                )
+            raise
         if project_task:
+            _record_workflow_event(
+                "orchestrator_pass_completed", run_id=workflow_run_id,
+                role="orchestrator", status="completed",
+            )
             try:
                 controller_raw = await _ask_ai(
                     controller_review_prompt(),
@@ -1709,6 +1735,15 @@ async def _run_agent_and_reply(message: Message, bot: Bot, prompt: str,
             except Exception:
                 log.exception("Controller review failed")
                 controller_report = "Заблокировано: контролёр не смог завершить проверку."
+            controller_status = (
+                "pass" if controller_report.startswith("Проверка пройдена")
+                else "needs_human" if controller_report.startswith("Нужен человек")
+                else "block"
+            )
+            _record_workflow_event(
+                "controller_pass_completed", run_id=workflow_run_id,
+                role="controller", status=controller_status,
+            )
             result += "\n\nПроверка контролёра:\n" + controller_report
     finally:
         done_event.set()
