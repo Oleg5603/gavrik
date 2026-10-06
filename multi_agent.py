@@ -120,6 +120,48 @@ class WorkflowState:
         return not blockers and all(item in approvals for item in required)
 
 
+def needs_controller_review(message: str, recent_context: str = "") -> bool:
+    """Run a separate read-only Controller pass for actionable project/system work."""
+    text = f"{recent_context}\n{message}".lower()
+    action = any(word in text for word in (
+        "созда", "сдела", "разработ", "исправ", "обнов", "включ", "запусти",
+        "развер", "измен", "настро", "проверь", "внедри", "активиру",
+        "implement", "deploy", "release", "build", "fix", "launch",
+    ))
+    scope = any(word in text for word in (
+        "бот", "агент", "систем", "код", "прилож", "проект", "репозитор",
+        "github", "автоматизац", "оркестратор", "контролёр", "контролер",
+        "workflow", "групп",
+    ))
+    return action and scope
+
+
+def controller_review_prompt() -> str:
+    """Read-only system prompt for the separate Controller model pass."""
+    return (
+        ROLES["controller"].prompt()
+        + "\nЭто отдельный контрольный проход после основного ответа. Работай только на чтение: "
+        "не меняй файлы, не запускай команды с побочными эффектами, не отправляй сообщения, "
+        "не сливай и не публикуй изменения. Проверь, действительно ли были выполнены заявленные "
+        "этапы и есть ли подтверждающие результаты; не считай описание роли доказательством её запуска. "
+        "Если невозможно проверить запуск роли или важный результат, укажи это как блокер, а не выдумывай. "
+        "Верни краткий JSON с полями status (pass/block/needs_human), checked (массив фактов), "
+        "findings (массив объектов severity/message) и next_action. Статусы pass/block допустимы "
+        "только при наличии фактических оснований."
+    )
+
+
+def build_controller_review_request(request: str, proposed_result: str) -> str:
+    return (
+        "Проведи контроль итогов запроса.\n"
+        f"Запрос пользователя:\n{request}\n\n"
+        f"Ответ и выполненные действия основного прохода:\n{proposed_result}\n\n"
+        "Проверь evidence для выполненных этапов, NFR, незакрытые critical/high замечания и "
+        "обязательные подтверждения. Если был заявлен запуск группы ролей, установи по доступным "
+        "артефактам, что роли действительно исполнялись, а не только перечислены в инструкции."
+    )
+
+
 def format_controller_report(raw: str) -> str:
     """Validate and render the Controller's JSON report; malformed output fails closed."""
     try:
@@ -127,6 +169,8 @@ def format_controller_report(raw: str) -> str:
     except (TypeError, json.JSONDecodeError):
         return "Заблокировано: контролёр не вернул проверяемый отчёт JSON."
 
+    if not isinstance(report, dict):
+        return "Заблокировано: неверный формат отчёта контролёра."
     status = report.get("status")
     if status not in {"pass", "block", "needs_human"}:
         return "Заблокировано: в отчёте контролёра неизвестный статус."
@@ -153,7 +197,7 @@ def format_controller_report(raw: str) -> str:
     next_action = report.get("next_action")
     if isinstance(next_action, str) and next_action:
         lines.append(f"Дальше: {next_action}")
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def orchestrator_context() -> str:
@@ -162,5 +206,8 @@ def orchestrator_context() -> str:
         f"Система «{SYSTEM_NAME}», группа агентов «{GROUP_NAME}»: " + names + ". "
         "Маршрут: " + " → ".join(WORKFLOW) + ". "
         "Максимум 3 итерации в каждом цикле; затем обязательная эскалация человеку. "
-        "Архитектура и релиз требуют human approval; critical/high замечания блокируют следующий gate."
+        "Архитектура и релиз требуют human approval; critical/high замечания блокируют следующий gate. "
+        "Для каждого изменяющего запроса проекта/бота запускается отдельная read-only проверка "
+        "ролью Controller. Не заявляй, что другие роли исполнялись, если нет их реальных выходов "
+        "или записей в журнале. До прохождения обязательных gate не сливай и не запускай релиз."
     )
