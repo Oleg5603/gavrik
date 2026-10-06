@@ -10,6 +10,7 @@ from multi_agent import (
     needs_controller_review,
     project_workflow_prompt,
     project_workflow_roles,
+    role_gate_passed,
     WorkflowState,
 )
 
@@ -50,6 +51,29 @@ class ControllerReviewTests(unittest.TestCase):
             self.assertEqual(saved["events"][0]["status"], "pass")
             self.assertNotIn("secret chat content", json.dumps(saved, ensure_ascii=False))
             self.assertNotIn("prompt", saved["events"][0])
+
+    def test_reviewer_and_qa_gates_require_valid_evidence(self):
+        reviewer = json.dumps({
+            "status": "approved",
+            "checked": ["diff inspected"],
+            "findings": [],
+        })
+        qa = json.dumps({
+            "status": "passed",
+            "checked": ["tests completed"],
+            "findings": [],
+        })
+        self.assertTrue(role_gate_passed("reviewer", reviewer)[0])
+        self.assertTrue(role_gate_passed("qa", qa)[0])
+        self.assertFalse(role_gate_passed("reviewer", "approved")[0])
+
+    def test_high_finding_blocks_role_gate(self):
+        report = json.dumps({
+            "status": "approved",
+            "checked": ["diff inspected"],
+            "findings": [{"severity": "high", "message": "unsafe change"}],
+        })
+        self.assertFalse(role_gate_passed("reviewer", report)[0])
 
     def test_controller_requires_evidence(self):
         raw = json.dumps({
