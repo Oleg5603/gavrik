@@ -26,6 +26,7 @@ import vk_lead_parser as _lead_parser
 import media as _media
 from multi_agent import (
     orchestrator_context,
+    project_workflow_prompt,
     needs_controller_review,
     controller_review_prompt,
     build_controller_review_request,
@@ -1688,11 +1689,15 @@ async def _run_agent_and_reply(message: Message, bot: Bot, prompt: str,
     ticker_task = asyncio.create_task(_ticker())
 
     try:
-        result = await _ask_ai(AGENT_SYSTEM, prompt, message.chat.id, image_path=image_path)
         recent_user_context = "\n".join(
             text for role, text in _history.get(message.chat.id, []) if role == "user"
         )[-4000:]
-        if needs_controller_review(prompt, recent_user_context):
+        project_task = needs_controller_review(prompt, recent_user_context)
+        agent_system = AGENT_SYSTEM
+        if project_task:
+            agent_system += "\n\n" + project_workflow_prompt()
+        result = await _ask_ai(agent_system, prompt, message.chat.id, image_path=image_path)
+        if project_task:
             try:
                 controller_raw = await _ask_ai(
                     controller_review_prompt(),
