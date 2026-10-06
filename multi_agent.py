@@ -133,39 +133,30 @@ class WorkflowState:
         return not blockers and all(item in approvals for item in required)
 
 
-def project_workflow_prompt(request: str = "") -> str:
-    """Build a truthful, scoped role-phase contract for project-change requests."""
+def project_workflow_roles(request: str = "") -> tuple[str, ...]:
+    """Return actual sequential model-call roles; Controller runs in its own final pass."""
     phase_keys = [key for key in WORKFLOW if key != "controller"]
     text = request.lower()
-    has_ui_work = any(word in text for word in (
+    if any(word in text for word in (
         "интерфейс", "экран", "кноп", "форма", "дизайн", "текст", "ui", "ux",
-    ))
-    if has_ui_work:
+    )):
         insert_at = phase_keys.index("challenger")
         phase_keys[insert_at:insert_at] = ["designer", "copywriter"]
+    return tuple(phase_keys)
 
-    phases = []
-    for key in phase_keys:
-        role = ROLES[key]
-        phases.append(
-            f"- {role.title}: {role.mission} "
-            f"Deliver: {', '.join(role.outputs)}. Done when: {role.exit_condition}."
-        )
-    approval_rule = (
-        "Перед реализацией проверь историю чата на явное подтверждение архитектуры именно для этой задачи. "
-        "Если подтверждения нет, остановись после Challenger, покажи короткий проект и запроси подтверждение; "
-        "Developer и последующие роли пока не запускай."
-    )
+
+def project_workflow_prompt(request: str = "") -> str:
+    """Shared guardrails for the orchestrator around sequential role calls."""
+    role_titles = " → ".join(ROLES[key].title for key in project_workflow_roles(request))
     return (
-        "Выполни маршрут проекта как последовательные фазы одного оркестраторского прохода "
-        "(это один вызов модели с ролевыми фазами, не отдельные процессы и не независимые агенты). "
-        "Передавай вывод предыдущей фазы следующей. Для каждой фазы кратко зафиксируй статус и проверяемые "
-        "основания; не выдумывай выполнения или одобрения. " + approval_rule + " "
-        "Разработчик может менять файлы только в разрешённом рабочем каталоге. Ревьюер и QA должны смотреть "
-        "на фактический diff и результаты проверок. Если проверки нельзя выполнить, пометь их незавершёнными. "
-        "Не выполняй слияние, публикацию или запуск в рабочей среде. Контролёр будет вызван отдельным "
-        "read-only проходом после ответа и проверит отчёт.\n"
-        + "\n".join(phases)
+        "Оркестратор должен вызывать указанные роли по одной, отдельными последовательными вызовами модели, "
+        "передавая каждой исходный запрос и краткие результаты предыдущих ролей. Это отдельные inference-вызовы, "
+        "но не фоновые процессы и не независимые worker-агенты. Ролевые результаты и статусы вызова записываются "
+        "в компактный журнал без текстов переписки. Маршрут: " + role_titles + ". "
+        "Developer работает с разрешёнными инструментами проекта; Reviewer, QA, Security, Protector и Controller "
+        "только читают и проверяют фактические артефакты. Не выдумывай выполнение, review approval или прохождение "
+        "тестов. Если инструмент недоступен, явно зафиксируй ограничение. Не сливай, не публикуй и не запускай "
+        "производственный релиз. Controller выполняется отдельно после всех обычных ролей."
     )
 
 
