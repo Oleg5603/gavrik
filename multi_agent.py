@@ -125,7 +125,7 @@ def needs_controller_review(message: str, recent_context: str = "") -> bool:
     text = f"{recent_context}\n{message}".lower()
     action = any(word in text for word in (
         "созда", "сдела", "разработ", "исправ", "обнов", "включ", "запусти",
-        "развер", "измен", "настро", "проверь", "внедри", "активиру",
+        "развер", "измен", "настро", "проверь", "поправ", "внедри", "активиру",
         "implement", "deploy", "release", "build", "fix", "launch",
     ))
     scope = any(word in text for word in (
