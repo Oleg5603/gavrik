@@ -6,6 +6,7 @@ from multi_agent import (
     controller_review_prompt,
     format_controller_report,
     needs_controller_review,
+    project_workflow_prompt,
 )
 
 
@@ -17,6 +18,17 @@ class ControllerReviewTests(unittest.TestCase):
     def test_skips_general_questions(self):
         self.assertFalse(needs_controller_review("Что делает контролёр системы?"))
         self.assertFalse(needs_controller_review("Найди авиабилеты", "проект отпуск"))
+
+    def test_builds_role_phases_in_declared_order(self):
+        prompt = project_workflow_prompt()
+        ordered = ["Планировщик", "Архитектор", "Адверсарий", "Разработчик",
+                   "Ревьюер", "Тестировщик QA", "Security Auditor",
+                   "UX Тестировщик", "Инженер по целостности"]
+        positions = [prompt.index(label) for label in ordered]
+        self.assertEqual(sorted(positions), positions)
+        self.assertIn("последовательные фазы", prompt)
+        self.assertIn("не отдельные процессы", prompt)
+        self.assertIn("Контролёр будет вызван отдельно", prompt)
 
     def test_controller_is_read_only_and_demands_evidence(self):
         prompt = controller_review_prompt()
