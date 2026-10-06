@@ -5,6 +5,5 @@
   "passengers": 2,
   "trip_type": "round_trip",
   "stay_days": 10,
-  "flight_total_cap_rub": 60000,
-  "tour_total_cap_rub": null
+  "group_total_cap_rub": 60000
 }
