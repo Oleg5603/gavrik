@@ -28,6 +28,8 @@ import media as _media
 from multi_agent import (
     orchestrator_context,
     project_workflow_prompt,
+    project_workflow_roles,
+    ROLES,
     needs_controller_review,
     controller_review_prompt,
     build_controller_review_request,
@@ -49,6 +51,63 @@ def _record_workflow_event(event_type: str, **metadata) -> None:
         state.record_event(event_type, **metadata)
     except Exception:
         log.exception("Не удалось записать событие рабочего процесса")
+
+
+async def _run_project_role_passes(
+    request: str,
+    recent_user_context: str,
+    run_id: str,
+    image_path: Path | None = None,
+) -> str:
+    """Run each project role in a separate sequential model call and journal call status."""
+    roles = project_workflow_roles(request + "\n" + recent_user_context)
+    contract = project_workflow_prompt(request + "\n" + recent_user_context)
+    outputs: list[tuple[str, str]] = []
+
+    for role_key in roles:
+        role = ROLES[role_key]
+        read_only = role_key != "developer"
+        role_system = AGENT_SYSTEM + "\n\n" + contract + "\n\n" + role.prompt()
+        if read_only:
+            role_system += (
+                "\nПроверяй только чтением: не меняй файлы, не отправляй сообщения и не выполняй "
+                "необратимые действия. Отчёт отделяй на факты, выводы и незакрытые риски."
+            )
+        else:
+            role_system += (
+                "\nВноси только минимальные изменения в рамках прямого запроса и разрешённых "
+                "инструментов. Не выполняй слияние, публикацию или production deploy."
+            )
+
+        prior = "\n\n".join(
+            f"Результат роли {ROLES[key].title}:\n{text[:1800]}"
+            for key, text in outputs[-4:]
+        )
+        role_message = (
+            f"Исходный запрос пользователя:\n{request}\n\n"
+            f"Недавний контекст пользователя:\n{recent_user_context[-2500:]}\n\n"
+            f"Предыдущие результаты:\n{prior or 'Это первый этап.'}\n\n"
+            "Выполни только свой этап и передай результат следующей роли."
+        )
+        _record_workflow_event(
+            "role_call_started", run_id=run_id, role=role_key, status="started"
+        )
+        output = await _ask_ai(
+            role_system,
+            role_message,
+            chat_id=None,
+            image_path=image_path if not outputs else None,
+            read_only=read_only,
+        )
+        outputs.append((role_key, output))
+        _record_workflow_event(
+            "role_call_completed", run_id=run_id, role=role_key, status="call_completed"
+        )
+
+    return "\n\n".join(
+        f"## {ROLES[key].title}\n{text[:5000]}"
+        for key, text in outputs
+    )
 
 # Режимы и история — загружаются из файла, переживают перезапуск
 _history: dict[int, list]
@@ -1707,25 +1766,28 @@ async def _run_agent_and_reply(message: Message, bot: Bot, prompt: str,
         )[-4000:]
         project_task = needs_controller_review(prompt, recent_user_context)
         workflow_run_id = uuid.uuid4().hex[:16] if project_task else None
-        agent_system = AGENT_SYSTEM
-        if project_task:
-            _record_workflow_event(
-                "project_workflow_started", run_id=workflow_run_id, role="orchestrator", status="started"
-            )
-            agent_system += "\n\n" + project_workflow_prompt(prompt)
         try:
-            result = await _ask_ai(agent_system, prompt, message.chat.id, image_path=image_path)
+            if project_task:
+                _record_workflow_event(
+                    "project_workflow_started", run_id=workflow_run_id, role="orchestrator", status="started"
+                )
+                result = await _run_project_role_passes(
+                    prompt, recent_user_context, workflow_run_id, image_path=image_path
+                )
+                _record_workflow_event(
+                    "project_workflow_completed", run_id=workflow_run_id,
+                    role="orchestrator", status="completed",
+                )
+            else:
+                result = await _ask_ai(
+                    AGENT_SYSTEM, prompt, message.chat.id, image_path=image_path
+                )
         except Exception:
             if project_task:
                 _record_workflow_event(
                     "project_workflow_failed", run_id=workflow_run_id, role="orchestrator", status="failed"
                 )
             raise
-        if project_task:
-            _record_workflow_event(
-                "orchestrator_pass_completed", run_id=workflow_run_id,
-                role="orchestrator", status="completed",
-            )
             try:
                 controller_raw = await _ask_ai(
                     controller_review_prompt(),
